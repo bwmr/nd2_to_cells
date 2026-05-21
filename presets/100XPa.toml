@@ -1,0 +1,17 @@
+# Tracking parameters for P. aeruginosa at 100x (60 nm/px).
+# Derived from SuperSegger preset 100XPa.mat.
+#
+# Differences from 100XEc:
+#   SMALL_AREA_MERGE  = 30  (vs 50 in Ec) — Pa cells are smaller
+#   REMOVE_STRAY      = 0   (vs 1 in Ec)  — keep unmapped regions as new cells
+
+[tracking]
+overlap_limit_min = 0.08
+da_max            = 0.3
+da_min            = -0.2
+min_area          = 8
+min_area_no_neigh = 30
+small_area_merge  = 30
+remove_stray      = false
+min_cell_age      = 5
+search_radius     = 15

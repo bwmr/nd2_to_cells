@@ -1,0 +1,51 @@
+# Tracking parameters for E. coli at 100x (60 nm/px).
+# Derived from SuperSegger preset 100XEc.mat.
+#
+# Parameters carried over from SuperSegger trackOpti struct:
+#   OVERLAP_LIMIT_MIN = 0.08  -> overlap_limit_min
+#   DA_MAX            = 0.3   -> da_max
+#   DA_MIN            = -0.2  -> da_min
+#   MIN_AREA          = 8     -> min_area
+#   MIN_AREA_NO_NEIGH = 30    -> min_area_no_neigh
+#   SMALL_AREA_MERGE  = 50    -> small_area_merge
+#   REMOVE_STRAY      = 1     -> remove_stray
+#   MIN_CELL_AGE      = 5     -> min_cell_age
+
+[tracking]
+# Minimum IoU (mask overlap / mask union) to consider two regions linked.
+# Equivalent to SuperSegger OVERLAP_LIMIT_MIN.
+overlap_limit_min = 0.08
+
+# Maximum normalised area change between frames: (area_t1 - area_t) / area_t1.
+# Positive = growth. Equivalent to SuperSegger DA_MAX.
+da_max = 0.3
+
+# Minimum normalised area change. Negative = shrinkage allowed.
+# Equivalent to SuperSegger DA_MIN.
+da_min = -0.2
+
+# Discard regions with area below this threshold (pixels).
+# Equivalent to SuperSegger MIN_AREA.
+min_area = 8
+
+# Discard isolated regions (no pixel-adjacent neighbours) below this area.
+# Equivalent to SuperSegger MIN_AREA_NO_NEIGH.
+min_area_no_neigh = 30
+
+# Try merging adjacent regions both below this area into a single region.
+# Equivalent to SuperSegger SMALL_AREA_MERGE.
+small_area_merge = 50
+
+# If true, delete regions that appear with no predecessor and also disappear
+# with no successor (stray detections). Equivalent to SuperSegger REMOVE_STRAY.
+remove_stray = true
+
+# Minimum track length (frames) for a cell cycle to be considered complete.
+# Controls Cell vs cell filename capitalisation.
+# Equivalent to SuperSegger MIN_CELL_AGE.
+min_cell_age = 5
+
+# Maximum centroid distance (pixels) for the fallback linker used when IoU = 0.
+# Handles daughters that don't overlap with the mother mask after division.
+# Not present in SuperSegger; set conservatively.
+search_radius = 15

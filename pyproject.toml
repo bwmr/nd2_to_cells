@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nd2_to_cells"
+version = "0.1.0"
+description = "Convert ND2 microscopy files to per-cell HDF5 files for timelapse analysis."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Benedikt Wimmer", email = "wimmer@stanford.edu"},
+]
+dependencies = [
+    "aicsimageio[nd2]",
+    "scikit-image",
+    "scipy",
+    "numpy",
+    "h5py",
+    "click",
+    "imageio",
+    "tqdm",
+    "pandas",
+]
+
+[project.scripts]
+nd2_to_cells = "nd2_to_cells.cli:cli"
+
+[project.optional-dependencies]
+dev = ["ruff"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nd2_to_cells*"]
+
+[tool.setuptools.package-data]
+nd2_to_cells = ["../presets/*.toml"]
