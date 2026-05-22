@@ -529,6 +529,12 @@ def _track_position(xy_dir: Path, params: TrackingParams, pad: int) -> None:
         print(f"  [skip] {xy_dir.name}: no masks/ directory")
         return
 
+    # Remove the cp_output directory Omnipose creates as a CLI artefact
+    cp_output_dir = xy_dir / "cp_output"
+    if cp_output_dir.exists():
+        import shutil
+        shutil.rmtree(cp_output_dir)
+
     try:
         mask_paths = _enumerate_mask_paths(masks_dir)
     except FileNotFoundError as e:

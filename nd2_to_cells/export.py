@@ -115,8 +115,7 @@ def run_export(
         p_str = f"{p + 1:0{p_pad}d}"
         xy_dir = output_dir / f"xy{p_str}"
 
-        # Create subdirectories
-        (xy_dir / "masks").mkdir(parents=True, exist_ok=True)
+        # Create subdirectories (masks/ is created by Omnipose, not here)
         (xy_dir / "cell").mkdir(parents=True, exist_ok=True)
         for nd2_c, (subdir, _) in channel_map.items():
             if nd2_c < n_c:
