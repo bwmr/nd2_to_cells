@@ -1,35 +1,29 @@
 """IoU-based cell tracker: links Omnipose masks across frames, writes cell*.h5.
 
 Algorithm (per xy position):
-    1. Load all Omnipose PNG masks; extract per-frame region properties.
-    2. Pre-filter: discard tiny / isolated regions per preset thresholds.
-    3. Merge: merge adjacent sub-threshold regions into a single region.
-    4. Link frame-by-frame:
-         - Primary: IoU >= overlap_limit_min AND area change in [da_min, da_max]
-         - Fallback: centroid distance < search_radius (for daughters with no
-           mask overlap with mother after division)
-         - Division: one region in t maps to two in t+1 whose combined area
-           is within the normalised area-change bounds.
-    5. Apply stray-region policy (remove_stray preset flag).
-    6. Write one HDF5 file per track to xy{N}/cell/.
+    1. Enumerate mask file paths sorted by frame number (never load all at once).
+    2. Stream frame pairs: load frame t and t+1, extract region properties,
+       apply area filters and small-region merging, link, then discard t.
+    3. Write per-cell HDF5 files by re-reading only the frames each cell
+       was alive in (one frame at a time, never the full stack in memory).
+
+Memory design: at most 2 full labeled frames are held in RAM simultaneously.
+Region objects store only scalars (label, area, centroid, bbox) — no arrays.
+IoU is computed on the fly from label equality within the bbox overlap region.
 
 Derived from ObtrackerPy (Papagiannakis & Wimmer, 2024) with extensions
 for division detection, area filtering, and HDF5 output.
-
-SuperSegger calibration parameters are loaded from a preset TOML file;
-see presets/100XEc.toml for field descriptions.
 """
 
 import re
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import h5py
 import imageio.v3 as iio
 import numpy as np
-from skimage.measure import regionprops, label as sk_label
+from skimage.measure import regionprops
 from tqdm import tqdm
 
 try:
@@ -62,7 +56,6 @@ def load_preset(preset: str) -> TrackingParams:
     """Load tracking parameters from a preset name or .toml file path."""
     path = Path(preset)
     if not path.exists():
-        # Try named preset
         path = _PRESET_DIR / f"{preset}.toml"
     if not path.exists():
         raise FileNotFoundError(
@@ -77,7 +70,7 @@ def load_preset(preset: str) -> TrackingParams:
 
 
 # ---------------------------------------------------------------------------
-# Mask loading
+# Mask file enumeration (no loading)
 # ---------------------------------------------------------------------------
 
 def _parse_frame_number(fname: str) -> int:
@@ -87,13 +80,8 @@ def _parse_frame_number(fname: str) -> int:
     return int(m.group(1))
 
 
-def load_masks(masks_dir: Path) -> dict[int, np.ndarray]:
-    """Load all Omnipose PNG masks from a directory.
-
-    Returns:
-        Dict mapping 0-based frame index to labeled integer array.
-        Frame index = parsed frame number - 1 (converted to 0-based).
-    """
+def _enumerate_mask_paths(masks_dir: Path) -> list[tuple[int, Path]]:
+    """Return sorted list of (0-based-frame-index, path) for all mask PNGs."""
     pngs = sorted(
         [f for f in masks_dir.iterdir()
          if f.suffix.lower() == ".png" and "cp_masks" in f.name],
@@ -101,17 +89,16 @@ def load_masks(masks_dir: Path) -> dict[int, np.ndarray]:
     )
     if not pngs:
         raise FileNotFoundError(f"No *cp_masks.png files in {masks_dir}")
+    return [((_parse_frame_number(f.name) - 1), f) for f in pngs]
 
-    result = {}
-    for f in pngs:
-        frame_1based = _parse_frame_number(f.name)
-        frame_0based = frame_1based - 1
-        result[frame_0based] = iio.imread(f).astype(np.int32)
-    return result
+
+def _load_mask(path: Path) -> np.ndarray:
+    """Load one mask PNG as an int32 labeled array."""
+    return iio.imread(path).astype(np.int32)
 
 
 # ---------------------------------------------------------------------------
-# Region properties
+# Region properties — scalars only, no full-frame arrays
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -120,50 +107,78 @@ class Region:
     area: int
     centroid: tuple[float, float]   # (row, col)
     bbox: tuple[int, int, int, int]  # (min_row, min_col, max_row, max_col)
-    mask: np.ndarray                 # bool array, full-frame size
+    # No mask field — computed on demand from the labeled array
 
 
 def _extract_regions(labeled: np.ndarray, params: TrackingParams) -> list[Region]:
-    """Extract regions from a labeled mask, applying area pre-filters."""
+    """Extract region scalars from a labeled mask, applying min_area filter."""
     regions = []
-    props = regionprops(labeled)
-    for prop in props:
+    for prop in regionprops(labeled):
         if prop.area < params.min_area:
             continue
-        mask = labeled == prop.label
         regions.append(Region(
             label=prop.label,
             area=prop.area,
             centroid=(prop.centroid[0], prop.centroid[1]),
-            bbox=prop.bbox,  # (min_row, min_col, max_row, max_col)
-            mask=mask,
+            bbox=prop.bbox,
         ))
     return regions
 
 
+def _bboxes_overlap(b1: tuple, b2: tuple) -> bool:
+    """True if two (min_r, min_c, max_r, max_c) bboxes have any overlap."""
+    return (b1[0] < b2[2] and b2[0] < b1[2] and
+            b1[1] < b2[3] and b2[1] < b1[3])
+
+
+def _bbox_intersect(b1: tuple, b2: tuple) -> tuple[int, int, int, int] | None:
+    """Return the intersection bbox, or None if they don't overlap."""
+    r0 = max(b1[0], b2[0]); c0 = max(b1[1], b2[1])
+    r1 = min(b1[2], b2[2]); c1 = min(b1[3], b2[3])
+    if r1 <= r0 or c1 <= c0:
+        return None
+    return (r0, c0, r1, c1)
+
+
+def _iou_from_labeled(
+    labeled_a: np.ndarray, label_a: int, bbox_a: tuple,
+    labeled_b: np.ndarray, label_b: int, bbox_b: tuple,
+) -> float:
+    """Compute IoU using only the bbox overlap region — no full-frame arrays."""
+    inter_bbox = _bbox_intersect(bbox_a, bbox_b)
+    if inter_bbox is None:
+        return 0.0
+    r0, c0, r1, c1 = inter_bbox
+    patch_a = labeled_a[r0:r1, c0:c1] == label_a
+    patch_b = labeled_b[r0:r1, c0:c1] == label_b
+    inter = int(np.count_nonzero(patch_a & patch_b))
+    if inter == 0:
+        return 0.0
+    # Union = area_a + area_b - inter  (faster than materialising full union)
+    area_a = int(np.count_nonzero(labeled_a[bbox_a[0]:bbox_a[2], bbox_a[1]:bbox_a[3]] == label_a))
+    area_b = int(np.count_nonzero(labeled_b[bbox_b[0]:bbox_b[2], bbox_b[1]:bbox_b[3]] == label_b))
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Per-frame filtering and merging (operates on one labeled frame at a time)
+# ---------------------------------------------------------------------------
+
 def _has_neighbour(region: Region, all_regions: list[Region]) -> bool:
-    """Return True if region has any pixel-adjacent neighbour."""
-    # Dilate the region mask by 1px (4-connectivity) and check overlap
-    r = region
-    r0, c0, r1, c1 = r.bbox
+    """Return True if region has any spatially adjacent neighbour.
+
+    Uses only bbox proximity — no full-frame arrays.
+    Two regions are considered adjacent if their bboxes are within 1px.
+    """
+    r0, c0, r1, c1 = region.bbox
     for other in all_regions:
-        if other.label == r.label:
+        if other.label == region.label:
             continue
-        # Quick bounding-box proximity check first
         or0, oc0, or1, oc1 = other.bbox
         if r1 < or0 - 1 or or1 < r0 - 1 or c1 < oc0 - 1 or oc1 < c0 - 1:
             continue
-        # Pixel-level adjacency: expand one region by 1 and test overlap
-        expanded = np.zeros_like(r.mask)
-        H, W = r.mask.shape
-        expanded[
-            max(0, r0 - 1):min(H, r1 + 1),
-            max(0, c0 - 1):min(W, c1 + 1),
-        ] = True
-        expanded &= r.mask.__class__(np.ones_like(r.mask, dtype=bool))
-        # Simple: check if other.mask overlaps expanded area of r
-        if np.any(expanded & other.mask):
-            return True
+        return True
     return False
 
 
@@ -183,70 +198,36 @@ def _merge_small_regions(
     regions: list[Region],
     params: TrackingParams,
 ) -> tuple[np.ndarray, list[Region]]:
-    """Merge pairs of adjacent sub-threshold regions into one.
+    """Merge pairs of adjacent sub-threshold regions into one (in place).
 
-    Two regions both below small_area_merge that are adjacent are merged
-    by re-labelling both with the smaller label value.  Only one merge
-    pass is performed.
+    Operates on the labeled array directly; no full-frame bool copies.
     """
     threshold = params.small_area_merge
     small = [r for r in regions if r.area < threshold]
     if not small:
         return labeled, regions
 
-    merged_pairs: set[int] = set()
-    new_labeled = labeled.copy()
-
+    merged: set[int] = set()
     for r in small:
-        if r.label in merged_pairs:
+        if r.label in merged:
             continue
         r0, c0, r1, c1 = r.bbox
-        H, W = labeled.shape
-        expanded = np.zeros((H, W), dtype=bool)
-        expanded[
-            max(0, r0 - 1):min(H, r1 + 1),
-            max(0, c0 - 1):min(W, c1 + 1),
-        ] = r.mask[
-            max(0, r0 - 1) - r0 + max(0, -(r0 - 1)):,
-            max(0, c0 - 1) - c0 + max(0, -(c0 - 1)):,
-        ][:min(H, r1 + 1) - max(0, r0 - 1),
-          :min(W, c1 + 1) - max(0, c0 - 1)]
-        # Simpler: just dilate r.mask by 1 in-place
-        expanded = np.zeros((H, W), dtype=bool)
-        expanded[max(0, r0-1):min(H, r1+1), max(0, c0-1):min(W, c1+1)] = True
-        expanded &= ~r.mask  # border only (excluding self)
-
         for other in small:
-            if other.label == r.label or other.label in merged_pairs:
+            if other.label == r.label or other.label in merged:
                 continue
-            if np.any(expanded & other.mask):
-                # Merge other into r (keep r's label)
-                new_labeled[new_labeled == other.label] = r.label
-                merged_pairs.add(other.label)
-                break
+            or0, oc0, or1, oc1 = other.bbox
+            # Adjacent = bboxes within 1px of each other
+            if r1 < or0 - 1 or or1 < r0 - 1 or c1 < oc0 - 1 or oc1 < c0 - 1:
+                continue
+            labeled[labeled == other.label] = r.label
+            merged.add(other.label)
+            break
+
+    if not merged:
+        return labeled, regions
 
     # Rebuild region list from updated labeled image
-    new_regions = _extract_regions(new_labeled, params)
-    return new_labeled, new_regions
-
-
-# ---------------------------------------------------------------------------
-# IoU computation
-# ---------------------------------------------------------------------------
-
-def _iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
-    """Compute Intersection-over-Union of two boolean masks."""
-    inter = np.count_nonzero(mask_a & mask_b)
-    if inter == 0:
-        return 0.0
-    union = np.count_nonzero(mask_a | mask_b)
-    return inter / union
-
-
-def _bboxes_overlap(b1: tuple, b2: tuple) -> bool:
-    """Return True if two (min_row, min_col, max_row, max_col) bboxes overlap."""
-    return (b1[0] < b2[2] and b2[0] < b1[2] and
-            b1[1] < b2[3] and b2[1] < b1[3])
+    return labeled, _extract_regions(labeled, params)
 
 
 # ---------------------------------------------------------------------------
@@ -257,9 +238,8 @@ def _bboxes_overlap(b1: tuple, b2: tuple) -> bool:
 class Track:
     track_id: int
     frames: list[int] = field(default_factory=list)
-    labels: list[int] = field(default_factory=list)   # Omnipose label per frame
-    bboxes: list[tuple] = field(default_factory=list)  # (min_r, min_c, max_r, max_c)
-    centroids: list[tuple] = field(default_factory=list)
+    labels: list[int] = field(default_factory=list)
+    bboxes: list[tuple] = field(default_factory=list)
     areas: list[int] = field(default_factory=list)
     mother_id: int = 0
     sister_id: int = 0
@@ -269,191 +249,168 @@ class Track:
 
 
 # ---------------------------------------------------------------------------
-# Linker
+# Streaming linker — loads one frame pair at a time
 # ---------------------------------------------------------------------------
 
 def _normalised_area_change(area_t: int, area_t1: int) -> float:
-    """(area_t1 - area_t) / area_t1, matching SuperSegger's DA convention."""
     if area_t1 == 0:
         return 0.0
     return (area_t1 - area_t) / area_t1
 
 
-def link_frames(
-    frames_regions: dict[int, list[Region]],
+def link_frames_streaming(
+    mask_paths: list[tuple[int, Path]],
     params: TrackingParams,
 ) -> dict[int, Track]:
-    """Link regions across all frames into tracks.
+    """Link regions across all frames, loading only two frames at a time.
+
+    Args:
+        mask_paths: List of (0-based-frame-index, path) sorted by frame.
+        params:     Tracking parameters.
 
     Returns:
-        Dict mapping track_id -> Track.
+        Dict mapping track_id -> Track (scalars only, no arrays).
     """
-    sorted_frames = sorted(frames_regions.keys())
     tracks: dict[int, Track] = {}
     next_id = 1
+    active: dict[int, int] = {}  # label_in_current_frame -> track_id
 
-    # active_links[frame][region_label] = track_id
-    active: dict[int, int] = {}  # region_label (in current frame) -> track_id
+    n_frames = len(mask_paths)
 
-    for fi, frame in enumerate(sorted_frames):
-        regions_t = frames_regions[frame]
-        is_last = (fi == len(sorted_frames) - 1)
+    # Load first frame
+    frame_0, path_0 = mask_paths[0]
+    labeled_prev = _load_mask(path_0)
+    regions_prev = _extract_regions(labeled_prev, params)
+    regions_prev = _apply_area_filters(regions_prev, params)
+    labeled_prev, regions_prev = _merge_small_regions(labeled_prev, regions_prev, params)
 
-        if fi == 0:
-            # Initialise all regions in first frame as new tracks
-            new_active = {}
-            for r in regions_t:
-                tid = next_id; next_id += 1
-                tracks[tid] = Track(
-                    track_id=tid,
-                    frames=[frame],
-                    labels=[r.label],
-                    bboxes=[r.bbox],
-                    centroids=[r.centroid],
-                    areas=[r.area],
-                    has_predecessor=False,
-                )
-                new_active[r.label] = tid
-            active = new_active
-            continue
+    # Initialise tracks for first frame
+    for r in regions_prev:
+        tid = next_id; next_id += 1
+        tracks[tid] = Track(
+            track_id=tid, frames=[frame_0], labels=[r.label],
+            bboxes=[r.bbox], areas=[r.area], has_predecessor=False,
+        )
+        active[r.label] = tid
 
-        regions_t1 = regions_t  # "t+1" in the description; current frame
-        regions_t0 = frames_regions[sorted_frames[fi - 1]]  # previous frame
+    for fi in range(1, n_frames):
+        frame_cur, path_cur = mask_paths[fi]
+        is_last = (fi == n_frames - 1)
 
-        # Build lookup: label -> Region for current frame
-        t1_by_label: dict[int, Region] = {r.label: r for r in regions_t1}
-        # Track which t1 regions have been claimed by a t0 predecessor
-        claimed_t1: set[int] = set()
-        # Regions in t0 that found a successor
-        linked_t0: set[int] = set()
+        labeled_cur = _load_mask(path_cur)
+        regions_cur = _extract_regions(labeled_cur, params)
+        regions_cur = _apply_area_filters(regions_cur, params)
+        labeled_cur, regions_cur = _merge_small_regions(labeled_cur, regions_cur, params)
 
+        claimed: set[int] = set()
         new_active: dict[int, int] = {}
 
-        # --- For each region in t0, find candidates in t1 ---
-        for r0 in regions_t0:
+        for r0 in regions_prev:
             tid = active.get(r0.label)
             if tid is None:
-                continue  # orphan region from t0 (shouldn't happen)
+                continue
 
-            # Candidate regions in t1 with overlapping bboxes
             candidates_iou = []
             candidates_fallback = []
 
-            for r1 in regions_t1:
-                if r1.label in claimed_t1:
+            for r1 in regions_cur:
+                if r1.label in claimed:
                     continue
                 da = _normalised_area_change(r0.area, r1.area)
                 if da < params.da_min or da > params.da_max:
                     continue
-                iou = _iou(r0.mask, r1.mask) if _bboxes_overlap(r0.bbox, r1.bbox) else 0.0
-                if iou >= params.overlap_limit_min:
-                    candidates_iou.append((iou, r1))
-                else:
-                    # Centroid-distance fallback
-                    dist = np.hypot(
-                        r1.centroid[0] - r0.centroid[0],
-                        r1.centroid[1] - r0.centroid[1],
-                    )
-                    if dist <= params.search_radius:
-                        candidates_fallback.append((dist, r1))
 
-            # Prefer IoU candidates; fall back to centroid if none
+                if _bboxes_overlap(r0.bbox, r1.bbox):
+                    iou = _iou_from_labeled(
+                        labeled_prev, r0.label, r0.bbox,
+                        labeled_cur, r1.label, r1.bbox,
+                    )
+                    if iou >= params.overlap_limit_min:
+                        candidates_iou.append((iou, r1))
+                        continue
+
+                # Centroid-distance fallback
+                dist = np.hypot(
+                    r1.centroid[0] - r0.centroid[0],
+                    r1.centroid[1] - r0.centroid[1],
+                )
+                if dist <= params.search_radius:
+                    candidates_fallback.append((dist, r1))
+
+            # Prefer IoU candidates (sort best-first); fall back to centroid
             if candidates_iou:
-                candidates = [(1.0 / iou, r1) for iou, r1 in candidates_iou]
+                candidates = sorted(candidates_iou, key=lambda x: -x[0])  # highest IoU first
+                candidates = [(1.0 / iou, r1) for iou, r1 in candidates]
             elif candidates_fallback:
-                candidates = candidates_fallback
+                candidates = sorted(candidates_fallback, key=lambda x: x[0])
             else:
                 candidates = []
 
-            candidates.sort(key=lambda x: x[0])
-
             if len(candidates) == 0:
-                # Track ends — no action needed; track stays in tracks dict
-                linked_t0.add(r0.label)  # mark as "handled" (ended)
+                pass  # track ends naturally
 
             elif len(candidates) == 1:
-                # Standard 1-to-1 link
                 _, r1 = candidates[0]
-                tracks[tid].frames.append(frame)
+                tracks[tid].frames.append(frame_cur)
                 tracks[tid].labels.append(r1.label)
                 tracks[tid].bboxes.append(r1.bbox)
-                tracks[tid].centroids.append(r1.centroid)
                 tracks[tid].areas.append(r1.area)
                 new_active[r1.label] = tid
-                claimed_t1.add(r1.label)
-                linked_t0.add(r0.label)
+                claimed.add(r1.label)
 
             else:
-                # Multiple candidates — check for division (top 2)
+                # Check top 2 for division
                 _, r1a = candidates[0]
                 _, r1b = candidates[1]
-                combined_area = r1a.area + r1b.area
-                da_div = _normalised_area_change(r0.area, combined_area)
+                combined = r1a.area + r1b.area
+                da_div = _normalised_area_change(r0.area, combined)
 
-                if (params.da_min <= da_div <= params.da_max
-                        and r1b.label not in claimed_t1):
-                    # Division event
+                if params.da_min <= da_div <= params.da_max and r1b.label not in claimed:
                     tracks[tid].divide = True
-
                     tid_a = next_id; next_id += 1
                     tid_b = next_id; next_id += 1
-
                     tracks[tid].daughter_ids = [tid_a, tid_b]
 
-                    for (tid_d, r1_d) in [(tid_a, r1a), (tid_b, r1b)]:
+                    for tid_d, r1_d in [(tid_a, r1a), (tid_b, r1b)]:
                         tracks[tid_d] = Track(
                             track_id=tid_d,
-                            frames=[frame],
-                            labels=[r1_d.label],
-                            bboxes=[r1_d.bbox],
-                            centroids=[r1_d.centroid],
-                            areas=[r1_d.area],
+                            frames=[frame_cur], labels=[r1_d.label],
+                            bboxes=[r1_d.bbox], areas=[r1_d.area],
                             mother_id=tid,
                             sister_id=tid_b if tid_d == tid_a else tid_a,
                             has_predecessor=True,
                         )
                         new_active[r1_d.label] = tid_d
-                        claimed_t1.add(r1_d.label)
-
-                    linked_t0.add(r0.label)
+                        claimed.add(r1_d.label)
                 else:
-                    # Not a clean division; link to best candidate only
+                    # Link to best candidate only
                     _, r1 = candidates[0]
-                    tracks[tid].frames.append(frame)
+                    tracks[tid].frames.append(frame_cur)
                     tracks[tid].labels.append(r1.label)
                     tracks[tid].bboxes.append(r1.bbox)
-                    tracks[tid].centroids.append(r1.centroid)
                     tracks[tid].areas.append(r1.area)
                     new_active[r1.label] = tid
-                    claimed_t1.add(r1.label)
-                    linked_t0.add(r0.label)
+                    claimed.add(r1.label)
 
-        # --- New regions in t1 with no predecessor ---
-        for r1 in regions_t1:
-            if r1.label in claimed_t1:
+        # New regions with no predecessor
+        for r1 in regions_cur:
+            if r1.label in claimed:
                 continue
-            # This is a new/stray region
-            if params.remove_stray and not is_last:
-                # We can't know yet if it will have a successor;
-                # mark with has_predecessor=False and cull at the end.
-                pass
             tid = next_id; next_id += 1
             tracks[tid] = Track(
-                track_id=tid,
-                frames=[frame],
-                labels=[r1.label],
-                bboxes=[r1.bbox],
-                centroids=[r1.centroid],
-                areas=[r1.area],
-                has_predecessor=False,
+                track_id=tid, frames=[frame_cur], labels=[r1.label],
+                bboxes=[r1.bbox], areas=[r1.area], has_predecessor=False,
             )
             new_active[r1.label] = tid
 
+        # Advance: current becomes previous, discard previous labeled array
+        labeled_prev = labeled_cur
+        regions_prev = regions_cur
         active = new_active
+        # labeled_prev now holds the only frame in memory
 
-    # --- Post-processing: remove_stray ---
+    # Remove stray single-frame tracks with no predecessor
     if params.remove_stray:
-        # A stray region: no predecessor AND no successor (single-frame track)
         tracks = {
             tid: t for tid, t in tracks.items()
             if not (not t.has_predecessor and len(t.frames) == 1)
@@ -463,16 +420,16 @@ def link_frames(
 
 
 # ---------------------------------------------------------------------------
-# Consensus bounding box and mask extraction
+# Consensus bounding box and HDF5 writing
 # ---------------------------------------------------------------------------
 
 def _union_bbox(bboxes: list[tuple]) -> tuple[int, int, int, int]:
-    """Return the union (min_row, min_col, max_row, max_col) of a list of bboxes."""
-    min_r = min(b[0] for b in bboxes)
-    min_c = min(b[1] for b in bboxes)
-    max_r = max(b[2] for b in bboxes)
-    max_c = max(b[3] for b in bboxes)
-    return (min_r, min_c, max_r, max_c)
+    return (
+        min(b[0] for b in bboxes),
+        min(b[1] for b in bboxes),
+        max(b[2] for b in bboxes),
+        max(b[3] for b in bboxes),
+    )
 
 
 def _squarify_and_pad(
@@ -480,56 +437,40 @@ def _squarify_and_pad(
     pad: int,
     img_shape: tuple[int, int],
 ) -> tuple[int, int, int, int]:
-    """Pad and squarify a bounding box, clamped to image dimensions.
-
-    Returns:
-        (r0, c0, r1, c1) in 0-based half-open convention.
-    """
+    """Pad and squarify a bounding box, clamped to image dimensions."""
     min_r, min_c, max_r, max_c = bbox
     h = max_r - min_r
     w = max_c - min_c
     side = max(h, w) + 2 * pad
-    # Centre the original bbox in the square
-    extra_h = side - h
-    extra_w = side - w
-    r0 = min_r - extra_h // 2
-    c0 = min_c - extra_w // 2
+    r0 = min_r - (side - h) // 2
+    c0 = min_c - (side - w) // 2
     r1 = r0 + side
     c1 = c0 + side
-    # Clamp to image
     H, W = img_shape
     r0 = max(0, r0); c0 = max(0, c0)
     r1 = min(H, r1); c1 = min(W, c1)
     return (r0, c0, r1, c1)
 
 
-def _touches_edge(
-    crop_box: tuple[int, int, int, int],
-    img_shape: tuple[int, int],
-) -> bool:
+def _touches_edge(crop_box: tuple, img_shape: tuple) -> bool:
     r0, c0, r1, c1 = crop_box
     H, W = img_shape
     return r0 == 0 or c0 == 0 or r1 == H or c1 == W
 
 
-# ---------------------------------------------------------------------------
-# HDF5 writing
-# ---------------------------------------------------------------------------
-
 def _write_cell_h5(
     cell_dir: Path,
     track: Track,
-    masks_by_frame: dict[int, np.ndarray],
+    frame_to_path: dict[int, Path],
     img_shape: tuple[int, int],
     pad: int,
     params: TrackingParams,
 ) -> None:
-    """Write one HDF5 file for a single tracked cell."""
+    """Write one HDF5 file, reading each mask frame on demand."""
     n_frames = len(track.frames)
     if n_frames == 0:
         return
 
-    # Consensus bounding box (union, then squarify + pad)
     union = _union_bbox(track.bboxes)
     r0, c0, r1, c1 = _squarify_and_pad(union, pad, img_shape)
     H_crop = r1 - r0
@@ -543,32 +484,19 @@ def _write_cell_h5(
     for fi, (abs_frame, lbl, per_frame_bbox) in enumerate(
         zip(track.frames, track.labels, track.bboxes)
     ):
-        labeled = masks_by_frame[abs_frame]
-        cell_mask_full = labeled == lbl
+        # Load just this one frame's mask on demand
+        labeled = _load_mask(frame_to_path[abs_frame])
+        mask_stack[:, :, fi] = (labeled[r0:r1, c0:c1] == lbl)
+        del labeled
 
-        # Crop to consensus box
-        cell_mask_crop = cell_mask_full[r0:r1, c0:c1]
-        mask_stack[:, :, fi] = cell_mask_crop
-
-        # Per-frame bbox in consensus crop coordinates
         fr0, fc0, fr1, fc1 = per_frame_bbox
-        bb_arr[fi] = [
-            fc0 - c0,          # x1 (col offset in crop)
-            fr0 - r0,          # y1 (row offset in crop)
-            fc1 - fc0,         # width
-            fr1 - fr0,         # height
-        ]
-        r_offset_arr[fi] = [c0, r0]  # [x, y] top-left in global image
+        bb_arr[fi] = [fc0 - c0, fr0 - r0, fc1 - fc0, fr1 - fr0]
+        r_offset_arr[fi] = [c0, r0]
         edge_arr[fi] = _touches_edge((r0, c0, r1, c1), img_shape)
 
-    # Determine filename capitalisation:
-    # Capital C = observed division AND track long enough
     birth_1based = track.frames[0] + 1
     death_1based = track.frames[-1] + 1
-    is_complete = (
-        track.divide
-        and n_frames >= params.min_cell_age
-    )
+    is_complete = track.divide and n_frames >= params.min_cell_age
     prefix = "Cell" if is_complete else "cell"
     fname = f"{prefix}{track.track_id:07d}.h5"
 
@@ -591,11 +519,7 @@ def _write_cell_h5(
 # Per-position entry point
 # ---------------------------------------------------------------------------
 
-def _track_position(
-    xy_dir: Path,
-    params: TrackingParams,
-    pad: int,
-) -> None:
+def _track_position(xy_dir: Path, params: TrackingParams, pad: int) -> None:
     """Run the full tracking pipeline for one xy position."""
     masks_dir = xy_dir / "masks"
     cell_dir = xy_dir / "cell"
@@ -605,42 +529,32 @@ def _track_position(
         print(f"  [skip] {xy_dir.name}: no masks/ directory")
         return
 
-    # Load masks
     try:
-        masks_by_frame = load_masks(masks_dir)
+        mask_paths = _enumerate_mask_paths(masks_dir)
     except FileNotFoundError as e:
         print(f"  [skip] {xy_dir.name}: {e}")
         return
 
-    if not masks_by_frame:
+    if not mask_paths:
         print(f"  [skip] {xy_dir.name}: empty masks/ directory")
         return
 
-    # Determine image shape from first mask
-    img_shape = next(iter(masks_by_frame.values())).shape[:2]
+    # Image shape from first frame only
+    img_shape = _load_mask(mask_paths[0][1]).shape[:2]
 
-    # Extract regions per frame, apply filters and merging
-    frames_regions: dict[int, list[Region]] = {}
-    sorted_frame_keys = sorted(masks_by_frame.keys())
+    # Build frame -> path lookup for HDF5 writing
+    frame_to_path = {frame: path for frame, path in mask_paths}
 
-    for frame in sorted_frame_keys:
-        labeled = masks_by_frame[frame]
-        regions = _extract_regions(labeled, params)
-        regions = _apply_area_filters(regions, params)
-        labeled_merged, regions = _merge_small_regions(labeled, regions, params)
-        masks_by_frame[frame] = labeled_merged  # use merged mask for crop extraction
-        frames_regions[frame] = regions
+    print(f"  {xy_dir.name}: linking {len(mask_paths)} frames...")
+    tracks = link_frames_streaming(mask_paths, params)
+    print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 files...")
 
-    # Link
-    tracks = link_frames(frames_regions, params)
-
-    # Write HDF5 files
-    for track in tracks.values():
-        _write_cell_h5(cell_dir, track, masks_by_frame, img_shape, pad, params)
+    for track in tqdm(tracks.values(), desc=f"  {xy_dir.name} cells",
+                      unit="cell", leave=False):
+        _write_cell_h5(cell_dir, track, frame_to_path, img_shape, pad, params)
 
 
 def _track_position_wrapper(args):
-    """Top-level wrapper for ProcessPoolExecutor."""
     xy_dir, preset_str, pad = args
     try:
         params = load_preset(preset_str)
@@ -680,7 +594,6 @@ def run_track(
         print(f"No xy*/ directories found in {data_dir}")
         return
 
-    # Validate preset exists before spawning workers
     params = load_preset(preset)
     print(
         f"Tracking {len(xy_dirs)} position(s) with preset '{preset}' "
@@ -689,9 +602,8 @@ def run_track(
         f"remove_stray={params.remove_stray})"
     )
 
-    args = [(str(d), preset, pad) for d in xy_dirs]
-
     if workers > 1:
+        args = [(str(d), preset, pad) for d in xy_dirs]
         with ProcessPoolExecutor(max_workers=workers) as pool:
             list(tqdm(
                 pool.map(_track_position_wrapper, args),
@@ -700,7 +612,7 @@ def run_track(
                 unit="pos",
             ))
     else:
-        for xy_dir in tqdm(xy_dirs, desc="Tracking positions", unit="pos"):
+        for xy_dir in xy_dirs:
             _track_position(xy_dir, params, pad)
 
     print("Tracking complete.")
