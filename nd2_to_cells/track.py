@@ -549,8 +549,7 @@ def _track_position(xy_dir: Path, params: TrackingParams, pad: int) -> None:
     tracks = link_frames_streaming(mask_paths, params)
     print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 files...")
 
-    for track in tqdm(tracks.values(), desc=f"  {xy_dir.name} cells",
-                      unit="cell", leave=False):
+    for track in tracks.values():
         _write_cell_h5(cell_dir, track, frame_to_path, img_shape, pad, params)
 
 
