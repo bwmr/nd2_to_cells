@@ -85,22 +85,31 @@ def export_cmd(nd2_path, output_dir, basename, phase_channel, z_project):
 )
 @click.option(
     "--max-shift-px", "max_shift_px", default=50.0, show_default=True, type=float,
-    help="Frame-to-frame shifts larger than this (pixels) are clamped to 0. "
+    help="Shifts larger than this (pixels) are clamped to 0. "
          "Guards against spurious large shifts from blurry or artifact frames.",
 )
-def align_cmd(data_dir, align_channel, workers, max_shift_px):
+@click.option(
+    "--sequential", "sequential", is_flag=True, default=False,
+    help="Use sequential frame-to-frame registration instead of the default "
+         "align-to-first mode. Use when drift between consecutive frames is "
+         "large (fast drift or slow frame rate).",
+)
+def align_cmd(data_dir, align_channel, workers, max_shift_px, sequential):
     """Correct stage drift across frames for all xy positions.
 
-    Computes frame-to-frame shifts from the align channel using
-    phase cross-correlation, then applies the same shifts to all
-    channel images. Images are padded to a common canvas size
-    (no cropping). Originals are preserved in raw_im/.
+    By default uses align-to-first mode: every frame is registered directly
+    against frame 0. This avoids compounding of subpixel errors over long
+    movies and is more robust for typical timelapse data with slow drift.
+
+    Use --sequential for fast drift or slow frame rates where consecutive
+    frames may be too dissimilar for reliable direct-to-frame-0 registration.
     """
     run_align(
         data_dir=data_dir,
         align_channel=align_channel,
         workers=workers,
         max_shift_px=max_shift_px,
+        align_to_first=not sequential,
     )
 
 

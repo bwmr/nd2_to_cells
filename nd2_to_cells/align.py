@@ -1,22 +1,30 @@
 """Frame drift correction for all xy positions.
 
+Two registration modes (controlled by align_to_first):
+
+  align_to_first=True (default):
+    Every frame is registered directly against frame 0. The shift for
+    each frame is measured independently, so subpixel noise does not
+    compound across frames. This is the most robust mode for long movies
+    with slow, monotonic drift — it matches SuperSegger's AlignToFirst
+    option. Recommended when drift is small relative to the frame interval.
+
+  align_to_first=False (sequential):
+    Each frame is registered against the previous frame (frame-to-frame).
+    Useful when drift between consecutive frames is large (fast drift or
+    slow frame rate) and a direct frame-0 comparison would be unreliable.
+    Equivalent to SuperSegger's default (AlignToFirst=false).
+    Clamping (max_shift_px) applies per step to reject outlier frames.
+
 Algorithm:
-    1. Load phase images in frame order and compute frame-to-frame shifts
-       via phase_cross_correlation (upsample_factor=100, matching
-       SuperSegger's precision=100).
-    2. Clamp each frame-to-frame shift to max_shift_px to reject spurious
-       large shifts caused by blurry or artifact frames.
-    3. Accumulate clamped shifts to get the correction for each frame
-       relative to frame 0.
-    4. Compute the minimum padding canvas that fits all shifted frames.
-    5. Shift every channel of every frame into the padded canvas and
-       write aligned TIFFs back in place.
+    1. Load the reference and one target frame at a time.
+    2. Compute shift via phase_cross_correlation (upsample_factor=100).
+    3. Clamp shifts exceeding max_shift_px to 0 (outlier rejection).
+    4. Compute the padded canvas size from all shifts.
+    5. Apply the same shift to every channel for each frame, writing
+       aligned TIFFs back in place. One frame loaded at a time.
 
-Memory: phase images for shift computation are loaded one pair at a time.
-        Per-channel alignment loads one frame at a time.
-
-Frame of reference: frame 0. All frames are brought to the coordinate
-system of frame 0.
+Memory: at most 2 frames held in RAM simultaneously.
 """
 
 import math
@@ -102,16 +110,16 @@ def _align_position(
     xy_dir: Path,
     align_channel: str,
     max_shift_px: float = 50.0,
+    align_to_first: bool = True,
 ) -> None:
     """Align all frames for one xy position.
 
     Args:
-        xy_dir:        Path to xy*/ directory.
-        align_channel: Name of the subdirectory used to compute shifts
-                       (typically 'phase').
-        max_shift_px:  Frame-to-frame shifts larger than this (in pixels)
-                       are clamped to 0. Guards against spurious large shifts
-                       from blurry or artifact frames.
+        xy_dir:          Path to xy*/ directory.
+        align_channel:   Subdirectory used to compute shifts (typically 'phase').
+        max_shift_px:    Shifts larger than this (pixels) are clamped to 0.
+        align_to_first:  If True (default), register every frame against frame 0.
+                         If False, use sequential frame-to-frame registration.
     """
     align_dir = xy_dir / align_channel
     if not align_dir.exists():
@@ -124,30 +132,43 @@ def _align_position(
         print(f"  [skip] {xy_dir.name}: fewer than 2 frames")
         return
 
-    # --- Step 1: compute frame-to-frame shifts, loading one pair at a time ---
-    raw_shifts = np.zeros((n_frames, 2))
-    prev = iio.imread(tif_paths[0]).astype(float)
-    img_shape = prev.shape[:2]
+    # --- Step 1: compute shifts relative to frame 0 ---
+    frame0 = iio.imread(tif_paths[0]).astype(float)
+    img_shape = frame0.shape[:2]
+    cum_shifts = np.zeros((n_frames, 2))
     n_clamped = 0
 
-    for i in range(1, n_frames):
-        cur = iio.imread(tif_paths[i]).astype(float)
-        shift, _, _ = phase_cross_correlation(prev, cur, upsample_factor=100)
-
-        # Reject spurious large shifts (e.g. from blurry/artifact frames)
-        if np.sqrt(shift[0]**2 + shift[1]**2) > max_shift_px:
-            print(f"  {xy_dir.name} t{i}: shift {shift} exceeds {max_shift_px}px — clamped to 0")
-            shift = np.array([0.0, 0.0])
-            n_clamped += 1
-
-        raw_shifts[i] = shift
-        prev = cur  # advance: only two frames in memory at a time
+    if align_to_first:
+        # Register every frame directly against frame 0.
+        # Shifts are absolute — no compounding of subpixel errors.
+        for i in range(1, n_frames):
+            cur = iio.imread(tif_paths[i]).astype(float)
+            shift, _, _ = phase_cross_correlation(frame0, cur, upsample_factor=100)
+            if np.hypot(shift[0], shift[1]) > max_shift_px:
+                print(f"  {xy_dir.name} t{i}: shift {shift} exceeds "
+                      f"{max_shift_px}px — clamped to 0")
+                shift = np.array([0.0, 0.0])
+                n_clamped += 1
+            cum_shifts[i] = shift
+    else:
+        # Sequential: each frame registered against the previous frame.
+        # Cumulative sum gives absolute correction relative to frame 0.
+        prev = frame0
+        raw_shifts = np.zeros((n_frames, 2))
+        for i in range(1, n_frames):
+            cur = iio.imread(tif_paths[i]).astype(float)
+            shift, _, _ = phase_cross_correlation(prev, cur, upsample_factor=100)
+            if np.hypot(shift[0], shift[1]) > max_shift_px:
+                print(f"  {xy_dir.name} t{i}: shift {shift} exceeds "
+                      f"{max_shift_px}px — clamped to 0")
+                shift = np.array([0.0, 0.0])
+                n_clamped += 1
+            raw_shifts[i] = shift
+            prev = cur
+        cum_shifts = np.cumsum(raw_shifts, axis=0)
 
     if n_clamped:
         print(f"  {xy_dir.name}: {n_clamped}/{n_frames-1} shifts clamped")
-
-    # --- Step 2: accumulate to get corrections relative to frame 0 ---
-    cum_shifts = np.cumsum(raw_shifts, axis=0)  # shape (n_frames, 2)
 
     row_shifts = cum_shifts[:, 0]
     col_shifts = cum_shifts[:, 1]
@@ -199,9 +220,9 @@ def _align_position(
 
 def _align_position_wrapper(args):
     """Top-level wrapper for ProcessPoolExecutor (must be picklable)."""
-    xy_dir, align_channel, max_shift_px = args
+    xy_dir, align_channel, max_shift_px, align_to_first = args
     try:
-        _align_position(Path(xy_dir), align_channel, max_shift_px)
+        _align_position(Path(xy_dir), align_channel, max_shift_px, align_to_first)
     except Exception as exc:
         import traceback
         print(f"ERROR aligning {xy_dir}: {exc}")
@@ -217,15 +238,19 @@ def run_align(
     align_channel: str = "phase",
     workers: int = 1,
     max_shift_px: float = 50.0,
+    align_to_first: bool = True,
 ) -> None:
     """Drift-correct all xy positions in data_dir.
 
     Args:
-        data_dir:      Directory containing xy*/ subdirectories.
-        align_channel: Channel subdirectory used to compute shifts.
-        workers:       Number of parallel worker processes.
-        max_shift_px:  Frame-to-frame shifts larger than this are clamped
-                       to 0 (outlier rejection for blurry/artifact frames).
+        data_dir:        Directory containing xy*/ subdirectories.
+        align_channel:   Channel subdirectory used to compute shifts.
+        workers:         Number of parallel worker processes.
+        max_shift_px:    Shifts larger than this (px) are clamped to 0.
+        align_to_first:  If True (default), register each frame against
+                         frame 0 — avoids compounding of subpixel errors
+                         over long movies. If False, use sequential
+                         frame-to-frame registration.
     """
     data_dir = Path(data_dir)
     xy_dirs = sorted(
@@ -238,12 +263,13 @@ def run_align(
         print(f"No xy*/ directories found in {data_dir}")
         return
 
+    mode = "align-to-first" if align_to_first else "sequential"
     print(
         f"Aligning {len(xy_dirs)} position(s) using channel '{align_channel}' "
-        f"(max_shift_px={max_shift_px})..."
+        f"(mode={mode}, max_shift_px={max_shift_px})..."
     )
 
-    args = [(str(d), align_channel, max_shift_px) for d in xy_dirs]
+    args = [(str(d), align_channel, max_shift_px, align_to_first) for d in xy_dirs]
 
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -255,6 +281,6 @@ def run_align(
             ))
     else:
         for xy_dir in tqdm(xy_dirs, desc="Aligning positions", unit="pos"):
-            _align_position(xy_dir, align_channel, max_shift_px)
+            _align_position(xy_dir, align_channel, max_shift_px, align_to_first)
 
     print("Alignment complete.")
