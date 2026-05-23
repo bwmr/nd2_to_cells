@@ -83,7 +83,12 @@ def export_cmd(nd2_path, output_dir, basename, phase_channel, z_project):
     "--workers", default=1, show_default=True, type=int,
     help="Number of parallel worker processes (one per xy position).",
 )
-def align_cmd(data_dir, align_channel, workers):
+@click.option(
+    "--max-shift-px", "max_shift_px", default=50.0, show_default=True, type=float,
+    help="Frame-to-frame shifts larger than this (pixels) are clamped to 0. "
+         "Guards against spurious large shifts from blurry or artifact frames.",
+)
+def align_cmd(data_dir, align_channel, workers, max_shift_px):
     """Correct stage drift across frames for all xy positions.
 
     Computes frame-to-frame shifts from the align channel using
@@ -95,6 +100,7 @@ def align_cmd(data_dir, align_channel, workers):
         data_dir=data_dir,
         align_channel=align_channel,
         workers=workers,
+        max_shift_px=max_shift_px,
     )
 
 
