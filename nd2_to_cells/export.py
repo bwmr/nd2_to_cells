@@ -15,7 +15,6 @@ because they can differ between positions.
 """
 
 import math
-import shutil
 from pathlib import Path
 
 import imageio.v3 as iio
@@ -115,11 +114,8 @@ def run_export(
         p_str = f"{p + 1:0{p_pad}d}"
         xy_dir = output_dir / f"xy{p_str}"
 
-        # Create subdirectories (masks/ is created by Omnipose, not here)
+        # Create output skeleton (masks/ by Omnipose, channel subdirs by align)
         (xy_dir / "cell").mkdir(parents=True, exist_ok=True)
-        for nd2_c, (subdir, _) in channel_map.items():
-            if nd2_c < n_c:
-                (xy_dir / subdir).mkdir(parents=True, exist_ok=True)
 
         for t in tqdm(range(n_t), desc=f"  xy{p_str}", unit="frame", leave=False):
             t_str = f"{t + 1:0{t_pad}d}"
@@ -138,10 +134,6 @@ def run_export(
                     frame_data = frame_data[0]  # drop Z dimension
 
                 fname = f"{basename}_t{t_str}xy{p_str}c{c_suffix}.tif"
-                dest = xy_dir / subdir / fname
-                iio.imwrite(dest, frame_data)
-
-                # Write copy to raw_im/
-                shutil.copy2(dest, raw_im_dir / fname)
+                iio.imwrite(raw_im_dir / fname, frame_data)
 
     print(f"\nExport complete → {output_dir}")

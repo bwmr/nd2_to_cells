@@ -2,8 +2,8 @@
 
 import click
 
-from .export import run_export
 from .align import run_align
+from .export import run_export
 from .track import run_track
 
 
