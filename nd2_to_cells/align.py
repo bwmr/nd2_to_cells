@@ -240,9 +240,10 @@ def _align_position(
                 shift = np.array([0.0, 0.0])
                 n_clamped += 1
             raw_shifts[i] = shift
-            prev = scipy.ndimage.shift(
-                cur, (shift[0], shift[1]), mode="constant", cval=np.mean(cur)
-            )
+            prev = cur
+            # prev = scipy.ndimage.shift(
+            #    cur, (shift[0], shift[1]), mode="constant", cval=np.mean(cur)
+            # )
         cum_shifts = np.cumsum(raw_shifts, axis=0)
 
     if n_clamped:
