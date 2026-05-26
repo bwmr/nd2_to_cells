@@ -241,9 +241,7 @@ def _align_position(
                 n_clamped += 1
             raw_shifts[i] = shift
             prev = cur
-            # prev = scipy.ndimage.shift(
-            #    cur, (shift[0], shift[1]), mode="constant", cval=np.mean(cur)
-            # )
+
         cum_shifts = np.cumsum(raw_shifts, axis=0)
 
     if n_clamped:
@@ -335,7 +333,7 @@ def run_align(
     phase_channel_suffix: int = 1,
     workers: int = 1,
     max_shift_px: float = 50.0,
-    align_to_first: bool = True,
+    align_to_first: bool = False,
 ) -> None:
     """Drift-correct all xy positions in data_dir.
 

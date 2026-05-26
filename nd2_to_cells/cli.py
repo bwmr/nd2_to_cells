@@ -24,24 +24,38 @@ def cli():
 
 @cli.command("export")
 @click.option(
-    "--input", "nd2_path", required=True, type=click.Path(exists=True),
+    "--input",
+    "nd2_path",
+    required=True,
+    type=click.Path(exists=True),
     help="Path to the input ND2 file.",
 )
 @click.option(
-    "--output", "output_dir", required=True, type=click.Path(),
+    "--output",
+    "output_dir",
+    required=True,
+    type=click.Path(),
     help="Output directory. Created if it does not exist.",
 )
 @click.option(
-    "--basename", required=True, type=str,
+    "--basename",
+    required=True,
+    type=str,
     help="Filename prefix for all output TIFFs (e.g. '260430').",
 )
 @click.option(
-    "--phase-channel", "phase_channel", default=0, show_default=True, type=int,
+    "--phase-channel",
+    "phase_channel",
+    default=0,
+    show_default=True,
+    type=int,
     help="0-based index of the phase-contrast channel in the ND2 file. "
-         "All other channels become fluor1, fluor2, ... in order.",
+    "All other channels become fluor1, fluor2, ... in order.",
 )
 @click.option(
-    "--z-project", "z_project", default="mean",
+    "--z-project",
+    "z_project",
+    default="mean",
     type=click.Choice(["mean", "max"], case_sensitive=False),
     show_default=True,
     help="Z-projection method for Z-stacks.",
@@ -72,62 +86,89 @@ def export_cmd(nd2_path, output_dir, basename, phase_channel, z_project):
 
 @cli.command("align")
 @click.option(
-    "--data", "data_dir", required=True, type=click.Path(exists=True),
+    "--data",
+    "data_dir",
+    required=True,
+    type=click.Path(exists=True),
     help="Directory containing xy*/ subdirectories (output of nd2_to_cells export).",
 )
 @click.option(
-    "--align-channel", "align_channel", default="phase", show_default=True,
+    "--align-channel",
+    "align_channel",
+    default="phase",
+    show_default=True,
     help="Channel subdirectory name to use for computing shifts (default: phase).",
 )
 @click.option(
-    "--workers", default=1, show_default=True, type=int,
+    "--workers",
+    default=1,
+    show_default=True,
+    type=int,
     help="Number of parallel worker processes (one per xy position).",
 )
 @click.option(
-    "--max-shift-px", "max_shift_px", default=50.0, show_default=True, type=float,
+    "--max-shift-px",
+    "max_shift_px",
+    default=50.0,
+    show_default=True,
+    type=float,
     help="Shifts larger than this (pixels) are clamped to 0. "
-         "Guards against spurious large shifts from blurry or artifact frames.",
+    "Guards against spurious large shifts from blurry or artifact frames.",
 )
 @click.option(
-    "--sequential", "sequential", is_flag=True, default=False,
-    help="Use sequential frame-to-frame registration instead of the default "
-         "align-to-first mode. Use when drift between consecutive frames is "
-         "large (fast drift or slow frame rate).",
+    "--align-to-first",
+    "align_to_first",
+    is_flag=True,
+    default=False,
+    help="Register all frames against the first frame, instead of the default"
+    "sequential mode.",
 )
-def align_cmd(data_dir, align_channel, workers, max_shift_px, sequential):
+def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
     """Correct stage drift across frames for all xy positions.
 
-    By default uses align-to-first mode: every frame is registered directly
-    against frame 0. This avoids compounding of subpixel errors over long
-    movies and is more robust for typical timelapse data with slow drift.
+    By default uses sequential mode: every frame is registered against the previous
+    frame. This works well for slow drift or fast-changing contents.
 
-    Use --sequential for fast drift or slow frame rates where consecutive
-    frames may be too dissimilar for reliable direct-to-frame-0 registration.
+
+    Use align-to-first flag to align frames directly against frame 0. This avoids
+    compounding of subpixel errors over long movies.
+
     """
     run_align(
         data_dir=data_dir,
         align_channel=align_channel,
         workers=workers,
         max_shift_px=max_shift_px,
-        align_to_first=not sequential,
+        align_to_first=align_to_first,
     )
 
 
 @cli.command("track")
 @click.option(
-    "--data", "data_dir", required=True, type=click.Path(exists=True),
+    "--data",
+    "data_dir",
+    required=True,
+    type=click.Path(exists=True),
     help="Directory containing xy*/ subdirectories.",
 )
 @click.option(
-    "--preset", default="100XEc", show_default=True,
+    "--preset",
+    default="100XEc",
+    show_default=True,
     help="Preset name (e.g. '100XEc') or path to a custom .toml file.",
 )
 @click.option(
-    "--workers", default=1, show_default=True, type=int,
+    "--workers",
+    default=1,
+    show_default=True,
+    type=int,
     help="Number of parallel worker processes (one per xy position).",
 )
 @click.option(
-    "--pad", default=5, show_default=True, type=int,
+    "--pad",
+    default=5,
+    show_default=True,
+    type=int,
     help="Padding in pixels added around each cell's bounding box.",
 )
 def track_cmd(data_dir, preset, workers, pad):
