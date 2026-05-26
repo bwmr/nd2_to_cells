@@ -143,30 +143,6 @@ def _apply_shift(
     return canvas.astype(img.dtype)
 
 
-def _focus_score(fft: np.ndarray) -> float:
-    """Return a focus quality score for an image given its FFT.
-
-    Port of SuperSegger's isFocus.m. Computes the ratio of mid-frequency
-    power (wavelengths 8–12 px) to high-frequency power (wavelengths < 3 px).
-    Focused images have more mid-frequency content relative to high-frequency
-    noise. Score > 0 means the image is considered in focus.
-
-    Args:
-        fft: 2-D complex FFT of the image (np.fft.fft2 output, DC in [0,0]).
-    """
-    ss = fft.shape
-    pp1 = (fft * np.conj(fft)).real  # power spectrum
-    # Mean power along the first 10 rows, left half (low-frequency rows)
-    mean_pp1 = pp1[:10, : ss[1] // 2].mean(axis=0)
-    k = np.arange(1, len(mean_pp1) + 1) / ss[1]
-    lam = 1.0 / k
-    mm1 = mean_pp1[lam < 3].mean()  # high-freq power (λ < 3 px)
-    mm2 = mean_pp1[(lam > 8) & (lam < 12)].mean()  # mid-freq power
-    if mm1 == 0:
-        return 0.0
-    return float(mm2 / mm1 - 1)
-
-
 # ---------------------------------------------------------------------------
 # Per-position alignment
 # ---------------------------------------------------------------------------
@@ -232,7 +208,7 @@ def _align_position(
         print(f"  [skip] {xy_dir.name}: fewer than 2 frames")
         return
 
-    # --- Step 1: compute shifts relative to frame 0, with focus gating ---
+    # --- Step 1: compute shifts relative to frame 0 ---
     frame0 = iio.imread(ref_tifs[0]).astype(float)
     img_shape = frame0.shape[:2]
     cum_shifts = np.zeros((n_frames, 2))
@@ -242,26 +218,20 @@ def _align_position(
     if align_to_first:
         for i in range(1, n_frames):
             cur = iio.imread(ref_tifs[i]).astype(float)
-            # fft_cur = np.fft.fft2(cur)
-            # if _focus_score(fft_cur) <= 0:
-            #     print(f"  {xy_dir.name} t{i}: out of focus — skipping frame")
-            #     skipped.add(i)
-            #     cum_shifts[i] = cum_shifts[i - 1]
-            #     continue
-            shift, _, _ = phase_cross_correlation(frame0, cur, upsample_factor=100)
+
+            shift, _, _ = phase_cross_correlation(
+                frame0, cur, upsample_factor=100, normalization=None
+            )
             cum_shifts[i] = shift
     else:
         prev = frame0
         raw_shifts = np.zeros((n_frames, 2))
         for i in range(1, n_frames):
             cur = iio.imread(ref_tifs[i]).astype(float)
-            # fft_cur = np.fft.fft2(cur)
-            # if _focus_score(fft_cur) <= 0:
-            #     print(f"  {xy_dir.name} t{i}: out of focus — skipping frame")
-            #     skipped.add(i)
-            #     # raw_shifts[i] stays 0; carry forward by leaving prev unchanged
-            #     continue
-            shift, _, _ = phase_cross_correlation(prev, cur, upsample_factor=100)
+
+            shift, _, _ = phase_cross_correlation(
+                prev, cur, upsample_factor=100, normalization=None
+            )
             if np.hypot(shift[0], shift[1]) > max_shift_px:
                 print(
                     f"  {xy_dir.name} t{i}: shift {shift} exceeds "
