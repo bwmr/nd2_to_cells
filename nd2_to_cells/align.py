@@ -18,13 +18,16 @@ Two registration modes (controlled by align_to_first):
 
 Algorithm:
     1. Read source TIFFs from raw_im/, grouped by xy position and channel suffix.
-    2. Compute shifts from the align_channel subdirectory (identified by
-       phase_channel_suffix) using phase_cross_correlation (upsample_factor=100).
-    3. Clamp shifts exceeding max_shift_px to 0 (outlier rejection).
-    4. Compute the padded canvas size from all shifts.
-    5. Apply the same shift to every channel for each frame, writing
-       aligned TIFFs to xy{P}/{subdir}/. raw_im/ is left untouched.
-       One frame loaded at a time.
+    2. For each frame, compute an FFT-based focus score (port of SuperSegger
+       isFocus.m). Frames with score <= 0 are skipped entirely (no output file).
+    3. Compute shifts from the align_channel using phase_cross_correlation
+       (upsample_factor=100) on good frames only.
+    4. Clamp shifts exceeding max_shift_px to 0 (sequential mode only).
+    5. Compute the padded canvas size from good-frame shifts.
+    6. Place each frame in the padded canvas (integer shift), then apply the
+       fractional residual via scipy.ndimage.shift (spline interpolation) for
+       subpixel accuracy. Write aligned TIFFs to xy{P}/{subdir}/.
+       raw_im/ is left untouched. One frame loaded at a time.
 
 Memory: at most 2 frames held in RAM simultaneously.
 """
@@ -36,6 +39,7 @@ from pathlib import Path
 
 import imageio.v3 as iio
 import numpy as np
+import scipy.ndimage
 from skimage.registration import phase_cross_correlation
 from tqdm import tqdm
 
@@ -90,7 +94,7 @@ def _sorted_tifs(paths: list[Path]) -> list[Path]:
     return sorted(paths, key=lambda f: _parse_frame_number(f.name))
 
 
-def _shift_image(
+def _apply_shift(
     img: np.ndarray,
     dy: float,
     dx: float,
@@ -99,46 +103,68 @@ def _shift_image(
     col_offset: int,
     fill_value: float,
 ) -> np.ndarray:
-    """Place img, shifted by (dy, dx) corrections, into a padded canvas.
+    """Place img into a padded canvas and apply a subpixel shift.
 
-    The correction shifts are the cumulative values returned by
-    phase_cross_correlation accumulated relative to frame 0.
-    A positive dy means the frame drifted down relative to frame 0
-    (correction shifts it back up), and vice versa.
-
-    canvas[row_offset + r + dy, col_offset + c + dx] = img[r, c]
-    for all valid (r, c).
+    The integer part of (dy, dx) is handled by placing the image at
+    (row_offset + round(dy), col_offset + round(dx)) in the canvas.
+    The fractional residual is then applied via scipy.ndimage.shift
+    (spline interpolation), preserving subpixel registration accuracy.
 
     row_offset / col_offset are chosen so that all frames fit in the canvas.
     """
-    canvas = np.full(canvas_shape, fill_value, dtype=img.dtype)
+    canvas = np.full(canvas_shape, fill_value, dtype=np.float64)
 
     dy_i = int(round(dy))
     dx_i = int(round(dx))
     H, W = img.shape[:2]
 
-    # Source pixel (r, c) maps to canvas (row_offset + r + dy_i, col_offset + c + dx_i).
-    # Valid source range: canvas destination must be in [0, canvas_shape).
-    dst_r0 = row_offset + dy_i  # canvas row for src row 0
-    dst_c0 = col_offset + dx_i  # canvas col for src col 0
-
-    # Clamp to canvas bounds
+    dst_r0 = row_offset + dy_i
+    dst_c0 = col_offset + dx_i
     cr0 = max(0, dst_r0)
     cr1 = min(canvas_shape[0], dst_r0 + H)
     cc0 = max(0, dst_c0)
     cc1 = min(canvas_shape[1], dst_c0 + W)
 
-    if cr1 <= cr0 or cc1 <= cc0:
-        return canvas  # frame entirely outside canvas (shouldn't happen)
+    if cr1 > cr0 and cc1 > cc0:
+        sr0 = cr0 - dst_r0
+        sr1 = sr0 + (cr1 - cr0)
+        sc0 = cc0 - dst_c0
+        sc1 = sc0 + (cc1 - cc0)
+        canvas[cr0:cr1, cc0:cc1] = img[sr0:sr1, sc0:sc1]
 
-    # Corresponding source region
-    sr0 = cr0 - dst_r0
-    sr1 = sr0 + (cr1 - cr0)
-    sc0 = cc0 - dst_c0
-    sc1 = sc0 + (cc1 - cc0)
+    # Apply fractional residual with spline interpolation
+    frac_dy = dy - round(dy)
+    frac_dx = dx - round(dx)
+    if frac_dy != 0.0 or frac_dx != 0.0:
+        canvas = scipy.ndimage.shift(
+            canvas, (frac_dy, frac_dx), mode="constant", cval=fill_value
+        )
 
-    canvas[cr0:cr1, cc0:cc1] = img[sr0:sr1, sc0:sc1]
-    return canvas
+    return canvas.astype(img.dtype)
+
+
+def _focus_score(fft: np.ndarray) -> float:
+    """Return a focus quality score for an image given its FFT.
+
+    Port of SuperSegger's isFocus.m. Computes the ratio of mid-frequency
+    power (wavelengths 8–12 px) to high-frequency power (wavelengths < 3 px).
+    Focused images have more mid-frequency content relative to high-frequency
+    noise. Score > 0 means the image is considered in focus.
+
+    Args:
+        fft: 2-D complex FFT of the image (np.fft.fft2 output, DC in [0,0]).
+    """
+    ss = fft.shape
+    pp1 = (fft * np.conj(fft)).real  # power spectrum
+    # Mean power along the first 10 rows, left half (low-frequency rows)
+    mean_pp1 = pp1[:10, : ss[1] // 2].mean(axis=0)
+    k = np.arange(1, len(mean_pp1) + 1) / ss[1]
+    lam = 1.0 / k
+    mm1 = mean_pp1[lam < 3].mean()        # high-freq power (λ < 3 px)
+    mm2 = mean_pp1[(lam > 8) & (lam < 12)].mean()  # mid-freq power
+    if mm1 == 0:
+        return 0.0
+    return float(mm2 / mm1 - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -204,23 +230,40 @@ def _align_position(
         print(f"  [skip] {xy_dir.name}: fewer than 2 frames")
         return
 
-    # --- Step 1: compute shifts relative to frame 0 ---
+    # --- Step 1: compute shifts relative to frame 0, with focus gating ---
     frame0 = iio.imread(ref_tifs[0]).astype(float)
     img_shape = frame0.shape[:2]
     cum_shifts = np.zeros((n_frames, 2))
+    skipped: set[int] = set()
     n_clamped = 0
 
     if align_to_first:
         for i in range(1, n_frames):
             cur = iio.imread(ref_tifs[i]).astype(float)
-            shift, _, _ = phase_cross_correlation(frame0, cur, upsample_factor=100)
+            fft_cur = np.fft.fft2(cur)
+            if _focus_score(fft_cur) <= 0:
+                print(f"  {xy_dir.name} t{i}: out of focus — skipping frame")
+                skipped.add(i)
+                cum_shifts[i] = cum_shifts[i - 1]
+                continue
+            shift, _, _ = phase_cross_correlation(
+                frame0, cur, upsample_factor=100
+            )
             cum_shifts[i] = shift
     else:
         prev = frame0
         raw_shifts = np.zeros((n_frames, 2))
         for i in range(1, n_frames):
             cur = iio.imread(ref_tifs[i]).astype(float)
-            shift, _, _ = phase_cross_correlation(prev, cur, upsample_factor=100)
+            fft_cur = np.fft.fft2(cur)
+            if _focus_score(fft_cur) <= 0:
+                print(f"  {xy_dir.name} t{i}: out of focus — skipping frame")
+                skipped.add(i)
+                # raw_shifts[i] stays 0; carry forward by leaving prev unchanged
+                continue
+            shift, _, _ = phase_cross_correlation(
+                prev, cur, upsample_factor=100
+            )
             if np.hypot(shift[0], shift[1]) > max_shift_px:
                 print(
                     f"  {xy_dir.name} t{i}: shift {shift} exceeds "
@@ -235,14 +278,18 @@ def _align_position(
     if n_clamped:
         print(f"  {xy_dir.name}: {n_clamped}/{n_frames - 1} shifts clamped")
 
+    # Exclude skipped frames when computing canvas bounds
+    good = [i for i in range(n_frames) if i not in skipped]
     row_shifts = cum_shifts[:, 0]
     col_shifts = cum_shifts[:, 1]
+    good_row = row_shifts[good]
+    good_col = col_shifts[good]
 
-    # --- Step 2: compute padded canvas ---
-    row_offset = int(math.ceil(max(0.0, -row_shifts.min())))
-    col_offset = int(math.ceil(max(0.0, -col_shifts.min())))
-    canvas_h = img_shape[0] + row_offset + int(math.ceil(max(0.0, row_shifts.max())))
-    canvas_w = img_shape[1] + col_offset + int(math.ceil(max(0.0, col_shifts.max())))
+    # --- Step 2: compute padded canvas from good frames only ---
+    row_offset = int(math.ceil(max(0.0, -good_row.min())))
+    col_offset = int(math.ceil(max(0.0, -good_col.min())))
+    canvas_h = img_shape[0] + row_offset + int(math.ceil(max(0.0, good_row.max())))
+    canvas_w = img_shape[1] + col_offset + int(math.ceil(max(0.0, good_col.max())))
     canvas_shape = (canvas_h, canvas_w)
 
     # --- Step 3: apply shifts to every channel, write to xy_dir/{subdir}/ ---
@@ -260,9 +307,11 @@ def _align_position(
         out_dir.mkdir(exist_ok=True)
 
         for i, tif_path in enumerate(ch_tifs):
+            if i in skipped:
+                continue
             img = iio.imread(tif_path)
             fill = float(np.mean(img))
-            aligned = _shift_image(
+            aligned = _apply_shift(
                 img,
                 dy=cum_shifts[i, 0],
                 dx=cum_shifts[i, 1],
@@ -271,13 +320,16 @@ def _align_position(
                 col_offset=col_offset,
                 fill_value=fill,
             )
-            iio.imwrite(out_dir / tif_path.name, aligned.astype(img.dtype))
+            iio.imwrite(out_dir / tif_path.name, aligned)
 
+    n_good = len(good)
+    n_skip = len(skipped)
     print(
-        f"  {xy_dir.name}: aligned {n_frames} frames "
-        f"(canvas {canvas_h}x{canvas_w}, "
-        f"drift row=[{row_shifts.min():.1f},{row_shifts.max():.1f}] "
-        f"col=[{col_shifts.min():.1f},{col_shifts.max():.1f}])"
+        f"  {xy_dir.name}: aligned {n_good}/{n_frames} frames"
+        + (f" ({n_skip} skipped, out of focus)" if n_skip else "")
+        + f" (canvas {canvas_h}x{canvas_w}, "
+        f"drift row=[{good_row.min():.1f},{good_row.max():.1f}] "
+        f"col=[{good_col.min():.1f},{good_col.max():.1f}])"
     )
 
 
