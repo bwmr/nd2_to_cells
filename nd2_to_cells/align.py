@@ -270,14 +270,8 @@ def _align_position(
                 shift = np.array([0.0, 0.0])
                 n_clamped += 1
             raw_shifts[i] = shift
-            prev = _apply_shift(
-                cur,
-                shift[0],
-                shift[1],
-                cur.shape,
-                row_offset=0,
-                col_offset=0,
-                fill_value=np.mean(cur),
+            prev = scipy.ndimage.shift(
+                cur, (shift[0], shift[1]), mode="constant", cval=np.mean(cur)
             )
         cum_shifts = np.cumsum(raw_shifts, axis=0)
 
