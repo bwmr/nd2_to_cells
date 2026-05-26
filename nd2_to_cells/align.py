@@ -160,7 +160,7 @@ def _focus_score(fft: np.ndarray) -> float:
     mean_pp1 = pp1[:10, : ss[1] // 2].mean(axis=0)
     k = np.arange(1, len(mean_pp1) + 1) / ss[1]
     lam = 1.0 / k
-    mm1 = mean_pp1[lam < 3].mean()        # high-freq power (λ < 3 px)
+    mm1 = mean_pp1[lam < 3].mean()  # high-freq power (λ < 3 px)
     mm2 = mean_pp1[(lam > 8) & (lam < 12)].mean()  # mid-freq power
     if mm1 == 0:
         return 0.0
@@ -199,7 +199,8 @@ def _align_position(
 
     # Collect all TIFFs for this position from raw_im/
     all_tifs = [
-        f for f in raw_im_dir.iterdir()
+        f
+        for f in raw_im_dir.iterdir()
         if f.suffix.lower() in (".tif", ".tiff") and _parse_xy_str(f.name) == xy_str
     ]
     if not all_tifs:
@@ -215,7 +216,8 @@ def _align_position(
     # Identify the reference channel suffix for shift computation
     ref_suffix = next(
         (
-            s for s in all_suffixes
+            s
+            for s in all_suffixes
             if _channel_subdir(s, phase_channel_suffix, all_suffixes) == align_channel
         ),
         None,
@@ -240,30 +242,26 @@ def _align_position(
     if align_to_first:
         for i in range(1, n_frames):
             cur = iio.imread(ref_tifs[i]).astype(float)
-            fft_cur = np.fft.fft2(cur)
-            if _focus_score(fft_cur) <= 0:
-                print(f"  {xy_dir.name} t{i}: out of focus — skipping frame")
-                skipped.add(i)
-                cum_shifts[i] = cum_shifts[i - 1]
-                continue
-            shift, _, _ = phase_cross_correlation(
-                frame0, cur, upsample_factor=100
-            )
+            # fft_cur = np.fft.fft2(cur)
+            # if _focus_score(fft_cur) <= 0:
+            #     print(f"  {xy_dir.name} t{i}: out of focus — skipping frame")
+            #     skipped.add(i)
+            #     cum_shifts[i] = cum_shifts[i - 1]
+            #     continue
+            shift, _, _ = phase_cross_correlation(frame0, cur, upsample_factor=100)
             cum_shifts[i] = shift
     else:
         prev = frame0
         raw_shifts = np.zeros((n_frames, 2))
         for i in range(1, n_frames):
             cur = iio.imread(ref_tifs[i]).astype(float)
-            fft_cur = np.fft.fft2(cur)
-            if _focus_score(fft_cur) <= 0:
-                print(f"  {xy_dir.name} t{i}: out of focus — skipping frame")
-                skipped.add(i)
-                # raw_shifts[i] stays 0; carry forward by leaving prev unchanged
-                continue
-            shift, _, _ = phase_cross_correlation(
-                prev, cur, upsample_factor=100
-            )
+            # fft_cur = np.fft.fft2(cur)
+            # if _focus_score(fft_cur) <= 0:
+            #     print(f"  {xy_dir.name} t{i}: out of focus — skipping frame")
+            #     skipped.add(i)
+            #     # raw_shifts[i] stays 0; carry forward by leaving prev unchanged
+            #     continue
+            shift, _, _ = phase_cross_correlation(prev, cur, upsample_factor=100)
             if np.hypot(shift[0], shift[1]) > max_shift_px:
                 print(
                     f"  {xy_dir.name} t{i}: shift {shift} exceeds "
@@ -272,7 +270,15 @@ def _align_position(
                 shift = np.array([0.0, 0.0])
                 n_clamped += 1
             raw_shifts[i] = shift
-            prev = cur
+            prev = _apply_shift(
+                cur,
+                shift[0],
+                shift[1],
+                cur.shape,
+                row_offset=0,
+                col_offset=0,
+                fill_value=np.mean(cur),
+            )
         cum_shifts = np.cumsum(raw_shifts, axis=0)
 
     if n_clamped:
@@ -339,8 +345,12 @@ def _align_position_wrapper(args):
     phase_channel_suffix, max_shift_px, align_to_first = args[3], args[4], args[5]
     try:
         _align_position(
-            Path(xy_dir), Path(raw_im_dir), align_channel, phase_channel_suffix,
-            max_shift_px, align_to_first,
+            Path(xy_dir),
+            Path(raw_im_dir),
+            align_channel,
+            phase_channel_suffix,
+            max_shift_px,
+            align_to_first,
         )
     except Exception as exc:
         import traceback
@@ -402,8 +412,14 @@ def run_align(
     )
 
     args = [
-        (str(d), str(raw_im_dir), align_channel, phase_channel_suffix,
-         max_shift_px, align_to_first)
+        (
+            str(d),
+            str(raw_im_dir),
+            align_channel,
+            phase_channel_suffix,
+            max_shift_px,
+            align_to_first,
+        )
         for d in xy_dirs
     ]
 
@@ -420,8 +436,12 @@ def run_align(
     else:
         for xy_dir in tqdm(xy_dirs, desc="Aligning positions", unit="pos"):
             _align_position(
-                xy_dir, raw_im_dir, align_channel, phase_channel_suffix,
-                max_shift_px, align_to_first,
+                xy_dir,
+                raw_im_dir,
+                align_channel,
+                phase_channel_suffix,
+                max_shift_px,
+                align_to_first,
             )
 
     print("Alignment complete.")
