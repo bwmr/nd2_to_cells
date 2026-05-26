@@ -21,7 +21,6 @@ dependencies = [
     "click",
     "imageio",
     "tqdm",
-    "pandas",
 ]
 
 [project.scripts]
