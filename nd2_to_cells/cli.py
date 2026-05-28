@@ -63,17 +63,13 @@ def cli():
 def export_cmd(nd2_path, output_dir, basename, phase_channel, z_project):
     """Export an ND2 file to per-position TIFFs.
 
-    Creates one xy{N}/ subdirectory per microscope position, each containing:
+    Creates SuperSegger-like folder and exports frames to raw_im/ directory.
+
+    Files will be names {basename}_t{???}_xy{??}_c{?}.tif.    
+    Also creates one xy{N}/ subdirectory per microscope position, each containing:
 
     \b
-      phase/    — phase-contrast frames
-      fluor1/   — first fluorescence channel frames
-      fluor2/   — second fluorescence channel frames (if present)
-      ...
-      masks/    — empty directory (populated by Omnipose later)
       cell/     — empty directory (populated by nd2_to_cells track later)
-
-    Also writes raw_im/ containing pre-alignment copies of all TIFFs.
     """
     run_export(
         nd2_path=nd2_path,
@@ -126,9 +122,10 @@ def export_cmd(nd2_path, output_dir, basename, phase_channel, z_project):
 def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
     """Correct stage drift across frames for all xy positions.
 
+    Output frames will be saved to channel-specific subfolders in the xy{N}/ directory.
+
     By default uses sequential mode: every frame is registered against the previous
     frame. This works well for slow drift or fast-changing contents.
-
 
     Use align-to-first flag to align frames directly against frame 0. This avoids
     compounding of subpixel errors over long movies.
