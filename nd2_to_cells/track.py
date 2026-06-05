@@ -517,51 +517,101 @@ def _touches_edge(crop_box: tuple, img_shape: tuple) -> bool:
     return r0 == 0 or c0 == 0 or r1 == H or c1 == W
 
 
-def _write_cell_h5(
-    cell_dir: Path,
-    track: Track,
-    frame_to_path: dict[int, Path],
+def _alloc_track_buffers(
+    tracks: dict[int, "Track"],
     img_shape: tuple[int, int],
     pad: int,
-    params: TrackingParams,
+) -> dict[int, dict]:
+    """Pre-allocate crop buffers for every track (no mask reads).
+
+    Returns a dict mapping track_id -> buffer dict with:
+        crop:         (r0, c0, r1, c1) fixed crop box for the whole track
+        mask_stack:   bool array (H_crop, W_crop, n_frames), zeroed
+        bb_arr:       int32 array (n_frames, 4)
+        r_offset_arr: int32 array (n_frames, 2)
+        edge_arr:     bool array (n_frames,)
+        frame_index:  dict frame -> position in track.frames
+    """
+    buffers: dict[int, dict] = {}
+    for tid, track in tracks.items():
+        n = len(track.frames)
+        if n == 0:
+            continue
+        crop = _squarify_and_pad(_union_bbox(track.bboxes), pad, img_shape)
+        r0, c0, r1, c1 = crop
+        H_crop, W_crop = r1 - r0, c1 - c0
+
+        # Pre-fill scalar arrays (don't need mask data)
+        bb_arr = np.zeros((n, 4), dtype=np.int32)
+        r_offset_arr = np.zeros((n, 2), dtype=np.int32)
+        edge_arr = np.zeros(n, dtype=bool)
+        edge = _touches_edge(crop, img_shape)
+        for fi, per_frame_bbox in enumerate(track.bboxes):
+            fr0, fc0, fr1, fc1 = per_frame_bbox
+            bb_arr[fi] = [fc0 - c0, fr0 - r0, fc1 - fc0, fr1 - fr0]
+            r_offset_arr[fi] = [c0, r0]
+            edge_arr[fi] = edge
+
+        buffers[tid] = {
+            "crop": crop,
+            "mask_stack": np.zeros((H_crop, W_crop, n), dtype=bool),
+            "bb_arr": bb_arr,
+            "r_offset_arr": r_offset_arr,
+            "edge_arr": edge_arr,
+            "frame_index": {f: i for i, f in enumerate(track.frames)},
+        }
+    return buffers
+
+
+def _fill_buffers(
+    mask_paths: list[tuple[int, Path]],
+    tracks: dict[int, "Track"],
+    buffers: dict[int, dict],
 ) -> None:
-    """Write one HDF5 file, reading each mask frame on demand."""
-    n_frames = len(track.frames)
-    if n_frames == 0:
-        return
+    """Single pass over mask PNGs: load each frame once, fill all active crops.
 
-    union = _union_bbox(track.bboxes)
-    r0, c0, r1, c1 = _squarify_and_pad(union, pad, img_shape)
-    H_crop = r1 - r0
-    W_crop = c1 - c0
+    Builds the frame -> [track_id] inverted index internally so the caller
+    doesn't need to manage it.
+    """
+    from collections import defaultdict
 
-    mask_stack = np.zeros((H_crop, W_crop, n_frames), dtype=bool)
-    bb_arr = np.zeros((n_frames, 4), dtype=np.int32)
-    r_offset_arr = np.zeros((n_frames, 2), dtype=np.int32)
-    edge_arr = np.zeros(n_frames, dtype=bool)
+    frame_to_tids: dict[int, list[int]] = defaultdict(list)
+    for tid, track in tracks.items():
+        if tid not in buffers:
+            continue
+        for f in track.frames:
+            frame_to_tids[f].append(tid)
 
-    for fi, (abs_frame, lbl, per_frame_bbox) in enumerate(
-        zip(track.frames, track.labels, track.bboxes)
-    ):
-        # Load just this one frame's mask on demand
-        labeled = _load_mask(frame_to_path[abs_frame])
-        mask_stack[:, :, fi] = labeled[r0:r1, c0:c1] == lbl
+    for abs_frame, path in mask_paths:
+        tids = frame_to_tids.get(abs_frame)
+        if not tids:
+            continue
+        labeled = _load_mask(path)
+        for tid in tids:
+            track = tracks[tid]
+            buf = buffers[tid]
+            fi = buf["frame_index"][abs_frame]
+            r0, c0, r1, c1 = buf["crop"]
+            lbl = track.labels[fi]
+            buf["mask_stack"][:, :, fi] = labeled[r0:r1, c0:c1] == lbl
         del labeled
 
-        fr0, fc0, fr1, fc1 = per_frame_bbox
-        bb_arr[fi] = [fc0 - c0, fr0 - r0, fc1 - fc0, fr1 - fr0]
-        r_offset_arr[fi] = [c0, r0]
-        edge_arr[fi] = _touches_edge((r0, c0, r1, c1), img_shape)
 
-    birth_1based = track.frames[0] + 1
-    death_1based = track.frames[-1] + 1
+def _flush_track_to_h5(
+    cell_dir: Path,
+    track: "Track",
+    buf: dict,
+    params: TrackingParams,
+) -> None:
+    """Write one HDF5 file from a pre-filled buffer dict."""
+    n_frames = len(track.frames)
     is_complete = track.divide and n_frames >= params.min_cell_age
     prefix = "Cell" if is_complete else "cell"
     fname = f"{prefix}{track.track_id:07d}.h5"
 
     with h5py.File(cell_dir / fname, "w") as h5:
-        h5.create_dataset("birth", data=np.int64(birth_1based))
-        h5.create_dataset("death", data=np.int64(death_1based))
+        h5.create_dataset("birth", data=np.int64(track.frames[0] + 1))
+        h5.create_dataset("death", data=np.int64(track.frames[-1] + 1))
         h5.create_dataset("divide", data=np.int8(1 if track.divide else 0))
         h5.create_dataset("motherID", data=np.int64(track.mother_id))
         h5.create_dataset("sisterID", data=np.int64(track.sister_id))
@@ -569,11 +619,11 @@ def _write_cell_h5(
             "daughterID", data=np.array(track.daughter_ids, dtype=np.int64)
         )
         h5.create_dataset("frames", data=np.array(track.frames, dtype=np.int64))
-        h5.create_dataset("BB", data=bb_arr)
-        h5.create_dataset("r_offset", data=r_offset_arr)
-        h5.create_dataset("edgeFlag", data=edge_arr)
+        h5.create_dataset("BB", data=buf["bb_arr"])
+        h5.create_dataset("r_offset", data=buf["r_offset_arr"])
+        h5.create_dataset("edgeFlag", data=buf["edge_arr"])
         h5.create_dataset(
-            "mask", data=mask_stack, compression="gzip", compression_opts=4
+            "mask", data=buf["mask_stack"], compression="gzip", compression_opts=4
         )
 
 
@@ -612,15 +662,15 @@ def _track_position(xy_dir: Path, params: TrackingParams, pad: int) -> None:
     # Image shape from first frame only
     img_shape = _load_mask(mask_paths[0][1]).shape[:2]
 
-    # Build frame -> path lookup for HDF5 writing
-    frame_to_path = {frame: path for frame, path in mask_paths}
-
     print(f"  {xy_dir.name}: linking {len(mask_paths)} frames...")
     tracks = link_frames_streaming(mask_paths, params)
     print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 files...")
 
+    buffers = _alloc_track_buffers(tracks, img_shape, pad)
+    _fill_buffers(mask_paths, tracks, buffers)
     for track in tracks.values():
-        _write_cell_h5(cell_dir, track, frame_to_path, img_shape, pad, params)
+        if track.track_id in buffers:
+            _flush_track_to_h5(cell_dir, track, buffers[track.track_id], params)
 
 
 def _track_position_wrapper(args):
