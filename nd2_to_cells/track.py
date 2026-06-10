@@ -11,7 +11,7 @@ Memory design: at most 2 full labeled frames are held in RAM simultaneously.
 Region objects store only scalars (label, area, centroid, bbox) — no arrays.
 IoU is computed on the fly from label equality within the bbox overlap region.
 
-Derived from ObtrackerPy (Papagiannakis & Wimmer, 2024) with extensions
+Derived from ObtrackerPy (https://github.com/alexSysBio/ObtrackerPy) with extensions
 for division detection, area filtering, and HDF5 output.
 """
 

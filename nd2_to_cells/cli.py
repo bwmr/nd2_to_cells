@@ -65,7 +65,7 @@ def export_cmd(nd2_path, output_dir, basename, phase_channel, z_project):
 
     Creates SuperSegger-like folder and exports frames to raw_im/ directory.
 
-    Files will be names {basename}_t{???}_xy{??}_c{?}.tif.    
+    Files will be names {basename}_t{???}_xy{??}_c{?}.tif.
     Also creates one xy{N}/ subdirectory per microscope position, each containing:
 
     \b

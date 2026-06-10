@@ -18,13 +18,11 @@ Two registration modes (controlled by align_to_first):
 
 Algorithm:
     1. Read source TIFFs from raw_im/, grouped by xy position and channel suffix.
-    2. For each frame, compute an FFT-based focus score (port of SuperSegger
-       isFocus.m). Frames with score <= 0 are skipped entirely (no output file).
-    3. Compute shifts from the align_channel using phase_cross_correlation
-       (upsample_factor=100) on good frames only.
-    4. Clamp shifts exceeding max_shift_px to 0 (sequential mode only).
-    5. Compute the padded canvas size from good-frame shifts.
-    6. Place each frame in the padded canvas (integer shift), then apply the
+    2. Compute shifts from the align_channel using phase_cross_correlation
+       (upsample_factor=100).
+    3. Clamp shifts exceeding max_shift_px to 0 (sequential mode only).
+    4. Compute the padded canvas size from good-frame shifts.
+    5. Place each frame in the padded canvas (integer shift), then apply the
        fractional residual via scipy.ndimage.shift (spline interpolation) for
        subpixel accuracy. Write aligned TIFFs to xy{P}/{subdir}/.
        raw_im/ is left untouched. One frame loaded at a time.
@@ -208,11 +206,10 @@ def _align_position(
         print(f"  [skip] {xy_dir.name}: fewer than 2 frames")
         return
 
-    # --- Step 1: compute shifts relative to frame 0 ---
+    # --- Step 1: compute shifts ---
     frame0 = iio.imread(ref_tifs[0]).astype(float)
     img_shape = frame0.shape[:2]
     cum_shifts = np.zeros((n_frames, 2))
-    skipped: set[int] = set()
     n_clamped = 0
 
     if align_to_first:
@@ -247,18 +244,14 @@ def _align_position(
     if n_clamped:
         print(f"  {xy_dir.name}: {n_clamped}/{n_frames - 1} shifts clamped")
 
-    # Exclude skipped frames when computing canvas bounds
-    good = [i for i in range(n_frames) if i not in skipped]
     row_shifts = cum_shifts[:, 0]
     col_shifts = cum_shifts[:, 1]
-    good_row = row_shifts[good]
-    good_col = col_shifts[good]
 
     # --- Step 2: compute padded canvas from good frames only ---
-    row_offset = int(math.ceil(max(0.0, -good_row.min())))
-    col_offset = int(math.ceil(max(0.0, -good_col.min())))
-    canvas_h = img_shape[0] + row_offset + int(math.ceil(max(0.0, good_row.max())))
-    canvas_w = img_shape[1] + col_offset + int(math.ceil(max(0.0, good_col.max())))
+    row_offset = int(math.ceil(max(0.0, -row_shifts.min())))
+    col_offset = int(math.ceil(max(0.0, -col_shifts.min())))
+    canvas_h = img_shape[0] + row_offset + int(math.ceil(max(0.0, row_shifts.max())))
+    canvas_w = img_shape[1] + col_offset + int(math.ceil(max(0.0, col_shifts.max())))
     canvas_shape = (canvas_h, canvas_w)
 
     # --- Step 3: apply shifts to every channel, write to xy_dir/{subdir}/ ---
@@ -276,8 +269,6 @@ def _align_position(
         out_dir.mkdir(exist_ok=True)
 
         for i, tif_path in enumerate(ch_tifs):
-            if i in skipped:
-                continue
             img = iio.imread(tif_path)
             fill = float(np.mean(img))
             aligned = _apply_shift(
@@ -291,14 +282,11 @@ def _align_position(
             )
             iio.imwrite(out_dir / tif_path.name, aligned)
 
-    n_good = len(good)
-    n_skip = len(skipped)
     print(
-        f"  {xy_dir.name}: aligned {n_good}/{n_frames} frames"
-        + (f" ({n_skip} skipped, out of focus)" if n_skip else "")
+        f"  {xy_dir.name}: aligned {n_frames} frames"
         + f" (canvas {canvas_h}x{canvas_w}, "
-        f"drift row=[{good_row.min():.1f},{good_row.max():.1f}] "
-        f"col=[{good_col.min():.1f},{good_col.max():.1f}])"
+        f"drift row=[{row_shifts.min():.1f},{row_shifts.max():.1f}] "
+        f"col=[{col_shifts.min():.1f},{col_shifts.max():.1f}])"
     )
 
 
@@ -347,9 +335,9 @@ def run_align(
                               which corresponds to --phase-channel 0 in export).
         workers:              Number of parallel worker processes.
         max_shift_px:         Shifts larger than this (px) are clamped to 0.
-        align_to_first:       If True (default), register each frame against
-                              frame 0 — avoids compounding of subpixel errors
-                              over long movies. If False, use sequential
+        align_to_first:       If True, register each frame against frame 0 -
+                              avoids compounding of subpixel errors over long
+                              movies. If False, use sequential
                               frame-to-frame registration.
     """
     data_dir = Path(data_dir)

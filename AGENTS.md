@@ -65,7 +65,6 @@ nd2_to_cells track  --data /data/exp/ --preset 100XEc --workers 4
 - **Preset resolution**: `load_preset()` first tries the argument as a path; if not found, looks in `presets/{name}.toml`. Custom presets can be passed as a file path.
 - **Cell naming**: `cell{ID:07d}.h5` (lowercase) = partial observation; `Cell{ID:07d}.h5` (uppercase) = complete cell cycle (birth + division observed, length ≥ `min_cell_age`).
 - **Filename convention**: TIFFs are `{basename}_t{T}xy{P}c{C}.tif`; masks follow Omnipose pattern `*cp_masks.png`.
-- **`pandas` is a declared dependency but not currently imported** in any module — do not add a pandas import without a clear reason.
 
 ## Behavioral guidelines
 
