@@ -34,11 +34,12 @@ python -m omnipose --dir /data/experiment/xy01/phase/ \
   --mask_threshold 1 --flow_threshold 0 --diameter 30 --exclude_on_edges
 # repeat for each xy position, or loop
 
-# 4. Track cells and write per-cell HDF5 files
+# 4. Track cells and write HDF5 output
 nd2_to_cells track \
   --data /data/experiment/ \
   --preset 100XEc \
   --workers 4
+# add --consolidated to write one cells.h5 per position instead of one file per cell
 ```
 
 ## Output layout
@@ -51,16 +52,22 @@ nd2_to_cells track \
     fluor1/                  aligned fluorescence channel 1
     fluor2/                  aligned fluorescence channel 2 (if present)
     masks/                   Omnipose PNG masks (populated by step 3)
-    cell/                    per-cell HDF5 files (populated by step 4)
-      cell0000001.h5
+    cell/                    HDF5 output (populated by step 4)
+      cell0000001.h5         one file per tracked cell (default)
       Cell0000002.h5         capital C = complete cell cycle observed
-      ...
+      ...                    or, with --consolidated:
+      cells.h5               single file; one group per cell
   xy02/ ...
 ```
 
 ## HDF5 cell file layout
 
-Each `cell{ID:07d}.h5` contains:
+In the default mode each `cell{ID:07d}.h5` contains the datasets below at the
+root level. With `--consolidated`, all cells are stored in a single `cells.h5`
+per position; each cell occupies a group (e.g. `cells.h5/Cell0000002/`) and the
+same datasets live inside that group.
+
+Each cell contains:
 
 | Dataset    | Type        | Shape    | Description                                |
 |------------|-------------|----------|--------------------------------------------|

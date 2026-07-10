@@ -168,21 +168,30 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
     type=int,
     help="Padding in pixels added around each cell's bounding box.",
 )
-def track_cmd(data_dir, preset, workers, pad):
-    """Link cells across frames and write per-cell HDF5 files.
+@click.option(
+    "--consolidated",
+    is_flag=True,
+    default=False,
+    help="Write one cells.h5 per position (one group per cell) instead of one file per cell.",
+)
+def track_cmd(data_dir, preset, workers, pad, consolidated):
+    """Link cells across frames and write HDF5 output.
 
     Reads Omnipose PNG masks from xy{N}/masks/, links regions across
     frames using IoU-based assignment with a centroid-distance fallback,
-    detects division events, and writes one HDF5 file per tracked cell
-    to xy{N}/cell/.
+    detects division events, and writes HDF5 output to xy{N}/cell/.
 
-    Cell files are named cell{ID:07d}.h5 (lowercase) or Cell{ID:07d}.h5
-    (uppercase) for cells with a complete observed cell cycle (both birth
-    and division observed, length >= min_cell_age).
+    By default, writes one file per tracked cell: cell{ID:07d}.h5
+    (lowercase) or Cell{ID:07d}.h5 (uppercase, capital C = complete cell
+    cycle: both birth and division observed, length >= min_cell_age).
+
+    With --consolidated, writes a single cells.h5 per position where each
+    cell is stored as a group (e.g. cells.h5/Cell0000002/mask).
     """
     run_track(
         data_dir=data_dir,
         preset=preset,
         workers=workers,
         pad=pad,
+        consolidated=consolidated,
     )

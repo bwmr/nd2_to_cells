@@ -597,6 +597,39 @@ def _fill_buffers(
         del labeled
 
 
+def _flush_all_tracks_to_h5(
+    cell_dir: Path,
+    tracks: dict[int, "Track"],
+    buffers: dict[int, dict],
+    params: TrackingParams,
+) -> None:
+    """Write all tracks as groups into a single cells.h5 file."""
+    with h5py.File(cell_dir / "cells.h5", "w") as h5:
+        for track in tracks.values():
+            if track.track_id not in buffers:
+                continue
+            buf = buffers[track.track_id]
+            n_frames = len(track.frames)
+            is_complete = track.divide and n_frames >= params.min_cell_age
+            prefix = "Cell" if is_complete else "cell"
+            grp = h5.require_group(f"{prefix}{track.track_id:07d}")
+            grp.create_dataset("birth", data=np.int64(track.frames[0] + 1))
+            grp.create_dataset("death", data=np.int64(track.frames[-1] + 1))
+            grp.create_dataset("divide", data=np.int8(1 if track.divide else 0))
+            grp.create_dataset("motherID", data=np.int64(track.mother_id))
+            grp.create_dataset("sisterID", data=np.int64(track.sister_id))
+            grp.create_dataset(
+                "daughterID", data=np.array(track.daughter_ids, dtype=np.int64)
+            )
+            grp.create_dataset("frames", data=np.array(track.frames, dtype=np.int64))
+            grp.create_dataset("BB", data=buf["bb_arr"])
+            grp.create_dataset("r_offset", data=buf["r_offset_arr"])
+            grp.create_dataset("edgeFlag", data=buf["edge_arr"])
+            grp.create_dataset(
+                "mask", data=buf["mask_stack"], compression="gzip", compression_opts=4
+            )
+
+
 def _flush_track_to_h5(
     cell_dir: Path,
     track: "Track",
@@ -632,7 +665,9 @@ def _flush_track_to_h5(
 # ---------------------------------------------------------------------------
 
 
-def _track_position(xy_dir: Path, params: TrackingParams, pad: int) -> None:
+def _track_position(
+    xy_dir: Path, params: TrackingParams, pad: int, consolidated: bool = False
+) -> None:
     """Run the full tracking pipeline for one xy position."""
     masks_dir = xy_dir / "masks"
     cell_dir = xy_dir / "cell"
@@ -664,20 +699,23 @@ def _track_position(xy_dir: Path, params: TrackingParams, pad: int) -> None:
 
     print(f"  {xy_dir.name}: linking {len(mask_paths)} frames...")
     tracks = link_frames_streaming(mask_paths, params)
-    print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 files...")
+    print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 file(s)...")
 
     buffers = _alloc_track_buffers(tracks, img_shape, pad)
     _fill_buffers(mask_paths, tracks, buffers)
-    for track in tracks.values():
-        if track.track_id in buffers:
-            _flush_track_to_h5(cell_dir, track, buffers[track.track_id], params)
+    if consolidated:
+        _flush_all_tracks_to_h5(cell_dir, tracks, buffers, params)
+    else:
+        for track in tracks.values():
+            if track.track_id in buffers:
+                _flush_track_to_h5(cell_dir, track, buffers[track.track_id], params)
 
 
 def _track_position_wrapper(args):
-    xy_dir, preset_str, pad = args
+    xy_dir, preset_str, pad, consolidated = args
     try:
         params = load_preset(preset_str)
-        _track_position(Path(xy_dir), params, pad)
+        _track_position(Path(xy_dir), params, pad, consolidated)
     except Exception as exc:
         import traceback
 
@@ -695,14 +733,17 @@ def run_track(
     preset: str = "100XEc",
     workers: int = 1,
     pad: int = 5,
+    consolidated: bool = False,
 ) -> None:
-    """Link cells and write per-cell HDF5 files for all xy positions.
+    """Link cells and write HDF5 output for all xy positions.
 
     Args:
-        data_dir: Directory containing xy*/ subdirectories.
-        preset:   Preset name or path to .toml file.
-        workers:  Number of parallel worker processes.
-        pad:      Padding (px) added around each cell's bounding box.
+        data_dir:     Directory containing xy*/ subdirectories.
+        preset:       Preset name or path to .toml file.
+        workers:      Number of parallel worker processes.
+        pad:          Padding (px) added around each cell's bounding box.
+        consolidated: If True, write one cells.h5 per position (one group per
+                      cell) instead of one file per cell.
     """
     data_dir = Path(data_dir)
     xy_dirs = sorted(
@@ -723,7 +764,7 @@ def run_track(
     )
 
     if workers > 1:
-        args = [(str(d), preset, pad) for d in xy_dirs]
+        args = [(str(d), preset, pad, consolidated) for d in xy_dirs]
         with ProcessPoolExecutor(max_workers=workers) as pool:
             list(
                 tqdm(
@@ -735,6 +776,6 @@ def run_track(
             )
     else:
         for xy_dir in xy_dirs:
-            _track_position(xy_dir, params, pad)
+            _track_position(xy_dir, params, pad, consolidated)
 
     print("Tracking complete.")
