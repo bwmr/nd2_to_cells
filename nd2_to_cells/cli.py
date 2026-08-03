@@ -3,6 +3,7 @@
 import click
 
 from .align import run_align
+from .assemble import run_assemble
 from .export import run_export
 from .track import run_track
 
@@ -14,9 +15,10 @@ def cli():
     Three sequential subcommands:
 
     \b
-      export  — split ND2 into per-position TIFFs
-      align   — drift-correct phase and fluor images
-      track   — link cells across frames and write cell*.h5 files
+      export    — split ND2 into per-position TIFFs
+      align     — drift-correct phase and fluor images
+      assemble  — stack Z-slice TIFFs into per-timepoint ZYX TIFFs
+      track     — link cells across frames and write cell*.h5 files
 
     Run each subcommand with --help for details.
     """
@@ -58,9 +60,19 @@ def cli():
     default="mean",
     type=click.Choice(["mean", "max"], case_sensitive=False),
     show_default=True,
-    help="Z-projection method for Z-stacks.",
+    help="Z-projection method for Z-stacks. Ignored when --export-z-slices is set.",
 )
-def export_cmd(nd2_path, output_dir, basename, phase_channel, z_project):
+@click.option(
+    "--export-z-slices",
+    "export_z_slices",
+    is_flag=True,
+    default=False,
+    help="Write each Z slice as a separate TIFF instead of projecting. "
+    "Output filenames gain a z{Z} component: {basename}_t{T}xy{P}z{Z}c{C}.tif.",
+)
+def export_cmd(
+    nd2_path, output_dir, basename, phase_channel, z_project, export_z_slices
+):
     """Export an ND2 file to per-position TIFFs.
 
     Creates SuperSegger-like folder and exports frames to raw_im/ directory.
@@ -77,6 +89,7 @@ def export_cmd(nd2_path, output_dir, basename, phase_channel, z_project):
         basename=basename,
         phase_channel=phase_channel,
         z_project=z_project,
+        export_z_slices=export_z_slices,
     )
 
 
@@ -140,6 +153,47 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
     )
 
 
+@cli.command("assemble")
+@click.option(
+    "--data",
+    "data_dir",
+    required=True,
+    type=click.Path(exists=True),
+    help="Directory containing raw_im/ and xy*/ subdirectories "
+    "(output of nd2_to_cells export --export-z-slices).",
+)
+@click.option(
+    "--basename",
+    required=True,
+    type=str,
+    help="Filename prefix used during export (e.g. '260430').",
+)
+@click.option(
+    "--workers",
+    default=1,
+    show_default=True,
+    type=int,
+    help="Number of parallel worker processes (one per xy position).",
+)
+def assemble_cmd(data_dir, basename, workers):
+    """Stack per-Z-slice TIFFs into per-timepoint ZYX TIFFs.
+
+    Reads per-slice TIFFs from raw_im/ (written by export --export-z-slices),
+    groups them by position × timepoint × channel, and writes one ZYX TIFF
+    per group into xy{N}/{channel}/.
+
+    Use this instead of align when working with Z-stack data:
+
+    \b
+      export --export-z-slices  →  assemble  →  track
+    """
+    run_assemble(
+        data_dir=data_dir,
+        basename=basename,
+        workers=workers,
+    )
+
+
 @cli.command("track")
 @click.option(
     "--data",
@@ -172,7 +226,7 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
     "--consolidated",
     is_flag=True,
     default=False,
-    help="Write one cells.h5 per position (one group per cell) instead of one file per cell.",
+    help="Write one cells.h5 per position (grouped by cell) instead of per-cell file.",
 )
 def track_cmd(data_dir, preset, workers, pad, consolidated):
     """Link cells across frames and write HDF5 output.

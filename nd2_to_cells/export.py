@@ -8,6 +8,12 @@ where:
     M = floor(log10(n_positions))  + 1   (xy zero-padding width)
     C = 1 for phase, 2 for fluor1, 3 for fluor2, ...
 
+When export_z_slices=True, individual Z slices are written instead of a
+projection, using the naming convention:
+    {basename}_t{T:0Nd}xy{P:0Md}z{Z:0Kd}c{C}.tif
+
+where K = floor(log10(n_z_slices)) + 1.
+
 Positions in ND2 files are stored as *scenes* (aicsimageio terminology).
 They are accessed via img.set_scene(i) / img.scenes, NOT via an S
 dimension in get_image_data.  Dims (T, C, Z) are re-read per scene
@@ -44,16 +50,21 @@ def run_export(
     basename: str,
     phase_channel: int = 0,
     z_project: str = "mean",
+    export_z_slices: bool = False,
 ) -> None:
     """Export an ND2 file to per-position TIFFs.
 
     Args:
-        nd2_path:      Path to the ND2 file.
-        output_dir:    Root output directory.
-        basename:      Filename prefix (e.g. '260430').
-        phase_channel: 0-based channel index in the ND2 for phase contrast.
-                       All other channels become fluor1, fluor2, ... in order.
-        z_project:     Z-projection method ('mean' or 'max') for Z-stacks.
+        nd2_path:        Path to the ND2 file.
+        output_dir:      Root output directory.
+        basename:        Filename prefix (e.g. '260430').
+        phase_channel:   0-based channel index in the ND2 for phase contrast.
+                         All other channels become fluor1, fluor2, ... in order.
+        z_project:       Z-projection method ('mean' or 'max') for Z-stacks.
+                         Ignored when export_z_slices=True.
+        export_z_slices: If True, write each Z slice as a separate TIFF using
+                         the naming pattern {basename}_t{T}xy{P}z{Z}c{C}.tif
+                         instead of applying a Z-projection.
     """
     nd2_path = Path(nd2_path)
     output_dir = Path(output_dir)
@@ -117,6 +128,9 @@ def run_export(
         # Create output skeleton (masks/ by Omnipose, channel subdirs by align)
         (xy_dir / "cell").mkdir(parents=True, exist_ok=True)
 
+        n_z = img.dims.Z
+        z_pad = _pad_width(n_z)
+
         for t in tqdm(range(n_t), desc=f"  xy{p_str}", unit="frame", leave=False):
             t_str = f"{t + 1:0{t_pad}d}"
 
@@ -128,12 +142,17 @@ def run_export(
                 # Do NOT pass S= here — scene is already selected via set_scene.
                 frame_data = img.get_image_data("ZYX", T=t, C=nd2_c)
 
-                if has_z and frame_data.shape[0] > 1:
+                if export_z_slices and has_z and frame_data.shape[0] > 1:
+                    for z, slice_2d in enumerate(frame_data):
+                        z_str = f"{z + 1:0{z_pad}d}"
+                        fname = f"{basename}_t{t_str}xy{p_str}z{z_str}c{c_suffix}.tif"
+                        iio.imwrite(raw_im_dir / fname, slice_2d)
+                elif has_z and frame_data.shape[0] > 1:
                     frame_data = _z_project(frame_data, z_project)
+                    fname = f"{basename}_t{t_str}xy{p_str}c{c_suffix}.tif"
+                    iio.imwrite(raw_im_dir / fname, frame_data)
                 else:
-                    frame_data = frame_data[0]  # drop Z dimension
-
-                fname = f"{basename}_t{t_str}xy{p_str}c{c_suffix}.tif"
-                iio.imwrite(raw_im_dir / fname, frame_data)
+                    fname = f"{basename}_t{t_str}xy{p_str}c{c_suffix}.tif"
+                    iio.imwrite(raw_im_dir / fname, frame_data[0])
 
     print(f"\nExport complete → {output_dir}")

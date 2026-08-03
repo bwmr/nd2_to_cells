@@ -42,11 +42,41 @@ nd2_to_cells track \
 # add --consolidated to write one cells.h5 per position instead of one file per cell
 ```
 
+### Z-stack workflow (alternative to align)
+
+Use this workflow when your ND2 file contains a Z-stack and you want to
+preserve individual slices rather than project them:
+
+```bash
+# 1. Export all Z slices as individual TIFFs
+nd2_to_cells export \
+  --input experiment.nd2 \
+  --output /data/experiment/ \
+  --basename 260430 \
+  --export-z-slices
+
+# 2. Assemble slices into per-timepoint ZYX TIFFs
+nd2_to_cells assemble \
+  --data /data/experiment/ \
+  --basename 260430 \
+  --workers 4
+
+# 3. Run Omnipose (external, unchanged — targets xy{N}/phase/ as normal)
+
+# 4. Track cells and write HDF5 output (unchanged)
+nd2_to_cells track \
+  --data /data/experiment/ \
+  --preset 100XEc \
+  --workers 4
+```
+
 ## Output layout
 
 ```
 /data/experiment/
   raw_im/                    pre-alignment TIFF copies
+                             (Z-stack files named …_t{T}xy{P}z{Z}c{C}.tif
+                              when --export-z-slices is used)
   xy01/
     phase/                   aligned phase TIFFs
     fluor1/                  aligned fluorescence channel 1
@@ -59,6 +89,26 @@ nd2_to_cells track \
       cells.h5               single file; one group per cell
   xy02/ ...
 ```
+
+## Export options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--phase-channel N` | `0` | 0-based index of the phase-contrast channel. All other channels become `fluor1`, `fluor2`, … |
+| `--z-project mean\|max` | `mean` | Z-projection method applied when the ND2 contains a Z-stack. Ignored when `--export-z-slices` is set. |
+| `--export-z-slices` | off | Write each Z slice as a separate TIFF instead of projecting. Output files are named `{basename}_t{T}xy{P}z{Z}c{C}.tif`. |
+
+## Assemble options
+
+`assemble` is used in place of `align` for Z-stack data. It reads the
+per-slice TIFFs produced by `export --export-z-slices` and writes one
+**ZYX** TIFF per timepoint × channel into `xy{P}/{channel}/`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--data DIR` | required | Experiment directory containing `raw_im/` and `xy*/`. |
+| `--basename STR` | required | Filename prefix used during export (e.g. `260430`). |
+| `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
 
 ## HDF5 cell file layout
 
