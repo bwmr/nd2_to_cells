@@ -464,8 +464,9 @@ def link_frames_streaming(
         active = new_active
         # labeled_prev now holds the only frame in memory
 
-    # Remove stray single-frame tracks with no predecessor and no daughters
-    if params.remove_stray:
+    # Remove stray single-frame tracks with no predecessor and no daughters.
+    # Skip when n_frames == 1: every track is single-frame by definition.
+    if params.remove_stray and n_frames > 1:
         tracks = {
             tid: t
             for tid, t in tracks.items()
