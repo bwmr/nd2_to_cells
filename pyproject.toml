@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Convert ND2 microscopy files to per-cell HDF5 files for timelapse analysis."
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Benedikt Wimmer", email = "wimmer@stanford.edu"},
 ]

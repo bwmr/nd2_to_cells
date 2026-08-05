@@ -203,8 +203,8 @@ def _align_position(
     ref_tifs = _sorted_tifs(by_suffix[ref_suffix])
     n_frames = len(ref_tifs)
     if n_frames < 2:
-        print(f"  [skip] {xy_dir.name}: fewer than 2 frames")
-        return
+        print(f"  [warn] {xy_dir.name}: fewer than 2 frames")
+        # return
 
     # --- Step 1: compute shifts ---
     frame0 = iio.imread(ref_tifs[0]).astype(float)
