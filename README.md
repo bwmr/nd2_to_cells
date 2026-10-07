@@ -110,7 +110,7 @@ drift-corrected TIFFs into `xy{P}/phase/`, `xy{P}/fluor1/`, … Existing
 | `--basename STR` | auto | Filename prefix used during export. Required only if `raw_im/` contains more than one basename. |
 | `--align-channel NAME` | `phase` | Channel used to compute shifts. |
 | `--align-to-first` | off | Register every frame against frame 1 instead of the previous frame. |
-| `--max-shift-px N` | `50` | Sequential mode only: larger frame-to-frame shifts are set to 0. |
+| `--max-shift-px N` | `50` | A frame whose shift jumps by more than this from the previous accepted frame is an outlier and keeps that frame's shift, unless the next frame confirms the jump (real stage movement). |
 | `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
 
 ## Assemble options

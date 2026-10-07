@@ -10,18 +10,19 @@ Two registration modes (controlled by align_to_first):
     option. Recommended when drift is small relative to the frame interval.
 
   align_to_first=False (sequential, default):
-    Each frame is registered against the previous frame (frame-to-frame).
+    Each frame is registered against the last accepted frame (frame-to-frame).
     Useful when drift between consecutive frames is large (fast drift or
     slow frame rate) and a direct frame-0 comparison would be unreliable.
     Equivalent to SuperSegger's default (AlignToFirst=false).
-    Clamping (max_shift_px) applies per step to reject outlier frames.
 
 Algorithm:
     1. Read source TIFFs ({basename}_t{T}xy{P}c{C}.tif) from raw_im/, grouped by
        xy position and channel suffix. Other files in raw_im/ are ignored.
     2. Compute shifts from the align_channel using phase_cross_correlation
        (upsample_factor=100).
-    3. Clamp shifts exceeding max_shift_px to 0 (sequential mode only).
+    3. Outlier check (both modes): a frame whose shift differs from the last
+       accepted frame's by more than max_shift_px keeps the last accepted shift,
+       unless the next frame confirms the jump (then both are accepted).
     4. Compute the padded canvas size from good-frame shifts.
     5. Place each frame in the padded canvas (integer shift), then apply the
        fractional residual via scipy.ndimage.shift (spline interpolation) for
@@ -167,6 +168,73 @@ def _apply_shift(
     return canvas.astype(img.dtype)
 
 
+def _compute_shifts(
+    ref_tifs: list[Path],
+    max_shift_px: float,
+    align_to_first: bool,
+    label: str,
+) -> np.ndarray:
+    """Return (n_frames, 2) row/col shifts registering each frame onto frame 0.
+
+    Each frame is registered against a reference: frame 0 (align_to_first) or
+    the last accepted frame (sequential). A frame whose shift differs from the
+    last accepted frame's by more than max_shift_px is tentative: if the next
+    frame confirms the jump, both are accepted (real stage jump); otherwise it
+    is an outlier and keeps the last accepted frame's shift. At most 2 frames
+    are held in memory.
+    """
+    n_frames = len(ref_tifs)
+    shifts = np.zeros((n_frames, 2))
+    ref = iio.imread(ref_tifs[0]).astype(float)
+    ref_shift = np.zeros(2)  # shift of the reference frame
+    last = np.zeros(2)  # shift of the last accepted frame
+    pending = None  # (index, shift) of a tentative frame
+    n_held = 0
+
+    def hold(i: int, measured: np.ndarray) -> None:
+        nonlocal n_held
+        shifts[i] = last
+        n_held += 1
+        print(
+            f"  {label} {ref_tifs[i].name}: outlier shift {measured.round(1)} "
+            f"— using previous frame's shift {last.round(1)}"
+        )
+
+    for i in range(1, n_frames):
+        cur = iio.imread(ref_tifs[i]).astype(float)
+        d, _, _ = phase_cross_correlation(
+            ref, cur, upsample_factor=100, normalization=None
+        )
+        s = ref_shift + d
+
+        if np.hypot(*(s - last)) <= max_shift_px:
+            if pending is not None:
+                hold(*pending)
+        elif pending is not None and np.hypot(*(s - pending[1])) <= max_shift_px:
+            shifts[pending[0]] = pending[1]
+            print(
+                f"  {label} {ref_tifs[pending[0]].name}: jump "
+                f"{(pending[1] - last).round(1)} confirmed by next frame — accepted"
+            )
+        else:
+            if pending is not None:
+                hold(*pending)
+            pending = (i, s)
+            continue
+
+        pending = None
+        shifts[i] = s
+        last = s
+        if not align_to_first:
+            ref, ref_shift = cur, s
+
+    if pending is not None:
+        hold(*pending)
+    if n_held:
+        print(f"  {label}: {n_held}/{n_frames - 1} outlier frame(s) held")
+    return shifts
+
+
 # ---------------------------------------------------------------------------
 # Per-position alignment
 # ---------------------------------------------------------------------------
@@ -193,7 +261,7 @@ def _align_position(
         basename:             Export basename; other files in raw_im/ are ignored.
         align_channel:        Subdirectory name used to compute shifts (e.g. 'phase').
         phase_channel_suffix: c-suffix integer that maps to the 'phase' subdirectory.
-        max_shift_px:         Shifts larger than this (pixels) are clamped to 0.
+        max_shift_px:         Outlier threshold (pixels); see _compute_shifts.
         align_to_first:       If True, register every frame against frame 0.
                               If False, use sequential frame-to-frame registration.
     """
@@ -245,42 +313,8 @@ def _align_position(
         # return
 
     # --- Step 1: compute shifts ---
-    frame0 = iio.imread(ref_tifs[0]).astype(float)
-    img_shape = frame0.shape[:2]
-    cum_shifts = np.zeros((n_frames, 2))
-    n_clamped = 0
-
-    if align_to_first:
-        for i in range(1, n_frames):
-            cur = iio.imread(ref_tifs[i]).astype(float)
-
-            shift, _, _ = phase_cross_correlation(
-                frame0, cur, upsample_factor=100, normalization=None
-            )
-            cum_shifts[i] = shift
-    else:
-        prev = frame0
-        raw_shifts = np.zeros((n_frames, 2))
-        for i in range(1, n_frames):
-            cur = iio.imread(ref_tifs[i]).astype(float)
-
-            shift, _, _ = phase_cross_correlation(
-                prev, cur, upsample_factor=100, normalization=None
-            )
-            if np.hypot(shift[0], shift[1]) > max_shift_px:
-                print(
-                    f"  {xy_dir.name} t{i}: shift {shift} exceeds "
-                    f"{max_shift_px}px — clamped to 0"
-                )
-                shift = np.array([0.0, 0.0])
-                n_clamped += 1
-            raw_shifts[i] = shift
-            prev = cur
-
-        cum_shifts = np.cumsum(raw_shifts, axis=0)
-
-    if n_clamped:
-        print(f"  {xy_dir.name}: {n_clamped}/{n_frames - 1} shifts clamped")
+    img_shape = iio.improps(ref_tifs[0]).shape[:2]
+    cum_shifts = _compute_shifts(ref_tifs, max_shift_px, align_to_first, xy_dir.name)
 
     row_shifts = cum_shifts[:, 0]
     col_shifts = cum_shifts[:, 1]
@@ -376,7 +410,8 @@ def run_align(
         phase_channel_suffix: c-suffix integer in filenames that maps to 'phase'
                               (export always writes phase as c1).
         workers:              Number of parallel worker processes.
-        max_shift_px:         Shifts larger than this (px) are clamped to 0.
+        max_shift_px:         Outlier threshold (px) for frame-to-frame changes
+                              in shift; see _compute_shifts.
         align_to_first:       If True, register each frame against frame 0 -
                               avoids compounding of subpixel errors over long
                               movies. If False, use sequential

@@ -121,8 +121,10 @@ def export_cmd(
     default=50.0,
     show_default=True,
     type=float,
-    help="Sequential mode only: shifts larger than this (pixels) are clamped to 0. "
-    "Guards against spurious large shifts from blurry or artifact frames.",
+    help="A frame whose shift differs from the previous accepted frame's by more "
+    "than this (pixels) is treated as an outlier and keeps that frame's shift, "
+    "unless the next frame confirms the jump. Guards against spurious shifts "
+    "from blurry or artifact frames.",
 )
 @click.option(
     "--align-to-first",
