@@ -165,6 +165,11 @@ def _apply_shift(
             canvas, (frac_dy, frac_dx), mode="constant", cval=fill_value
         )
 
+    # Spline overshoot can leave the dtype range; clip so values don't wrap
+    if np.issubdtype(img.dtype, np.integer):
+        info = np.iinfo(img.dtype)
+        canvas = np.clip(canvas, info.min, info.max)
+
     return canvas.astype(img.dtype)
 
 
