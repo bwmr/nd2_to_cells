@@ -79,9 +79,20 @@ def _assemble_position(
         iio.imwrite(out_dir / fname, stack)
 
 
-def _assemble_position_wrapper(args: tuple) -> None:
-    """Picklable top-level wrapper for ProcessPoolExecutor."""
-    _assemble_position(*args)
+def _assemble_position_wrapper(args: tuple) -> str | None:
+    """Picklable top-level wrapper for ProcessPoolExecutor.
+
+    Returns an error message instead of raising, so other positions continue.
+    """
+    try:
+        _assemble_position(*args)
+    except Exception as exc:
+        import traceback
+
+        print(f"ERROR assembling xy{args[0]}: {exc}")
+        traceback.print_exc()
+        return f"xy{args[0]}: {exc}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +157,7 @@ def run_assemble(
 
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            list(
+            errors = list(
                 tqdm(
                     pool.map(_assemble_position_wrapper, tasks),
                     total=len(tasks),
@@ -155,7 +166,15 @@ def run_assemble(
                 )
             )
     else:
-        for task in tqdm(tasks, desc="Assembling", unit="pos"):
+        errors = [
             _assemble_position_wrapper(task)
+            for task in tqdm(tasks, desc="Assembling", unit="pos")
+        ]
 
+    failed = [e for e in errors if e]
+    if failed:
+        raise RuntimeError(
+            f"Assembly failed for {len(failed)}/{len(tasks)} position(s):\n  "
+            + "\n  ".join(failed)
+        )
     print(f"\nAssemble complete → {data_dir}")

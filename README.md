@@ -95,7 +95,7 @@ Caveats for the Z-stack workflow:
 |------|---------|-------------|
 | `--phase-channel N` | `0` | 0-based index of the phase-contrast channel. All other channels become `fluor1`, `fluor2`, … |
 | `--z-project mean\|max` | `mean` | Z-projection method applied when the ND2 contains a Z-stack. Ignored when `--export-z-slices` is set. |
-| `--export-z-slices` | off | Write each Z slice as a separate TIFF instead of projecting. Output files are named `{basename}_t{T}xy{P}z{Z}c{C}.tif`. |
+| `--export-z-slices` | off | Write each Z slice as a separate TIFF instead of projecting. Output files are named `{basename}_t{T}xy{P}z{Z}c{C}.tif`; positions with a single plane are written as `z1`. |
 
 ## Align options
 

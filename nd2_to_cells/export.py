@@ -80,13 +80,23 @@ def run_export(
     n_positions = len(img.scenes)
     p_pad = _pad_width(n_positions)
 
-    # Read dims from scene 0 to determine T, C, Z for channel map.
-    # (T and C are typically the same across all scenes; Z may vary but
-    # we use scene 0 as representative for the channel map only.)
-    img.set_scene(0)
-    n_timepoints = img.dims.T
-    n_channels = img.dims.C
+    # Read dims of every scene (metadata only) so time padding and the channel
+    # map cover all positions, not just scene 0.
+    scene_dims = []
+    for p in range(n_positions):
+        img.set_scene(p)
+        scene_dims.append((img.dims.T, img.dims.C))
+    n_timepoints = max(t for t, _ in scene_dims)
+    n_channels = max(c for _, c in scene_dims)
     t_pad = _pad_width(n_timepoints)
+    if len(set(scene_dims)) > 1:
+        print(f"[warn] scenes differ in (T, C): {scene_dims}")
+
+    if phase_channel >= n_channels:
+        raise ValueError(
+            f"phase_channel={phase_channel} but the ND2 has only "
+            f"{n_channels} channel(s) (0-based index)"
+        )
 
     # Build channel map: phase excluded, all others become fluor1, fluor2, ...
     fluor_channels = [c for c in range(n_channels) if c != phase_channel]
@@ -142,7 +152,9 @@ def run_export(
                 # Do NOT pass S= here — scene is already selected via set_scene.
                 frame_data = img.get_image_data("ZYX", T=t, C=nd2_c)
 
-                if export_z_slices and has_z and frame_data.shape[0] > 1:
+                if export_z_slices:
+                    # Always use z-slice names (z1 for single-plane scenes) so
+                    # every position is picked up by assemble
                     for z, slice_2d in enumerate(frame_data):
                         z_str = f"{z + 1:0{z_pad}d}"
                         fname = f"{basename}_t{t_str}xy{p_str}z{z_str}c{c_suffix}.tif"

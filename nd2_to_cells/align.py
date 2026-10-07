@@ -370,8 +370,11 @@ def _align_position(
     )
 
 
-def _align_position_wrapper(args):
-    """Top-level wrapper for ProcessPoolExecutor (must be picklable)."""
+def _align_position_wrapper(args) -> str | None:
+    """Top-level wrapper for ProcessPoolExecutor (must be picklable).
+
+    Returns an error message instead of raising, so other positions continue.
+    """
     xy_dir, raw_im_dir, basename, align_channel = args[0], args[1], args[2], args[3]
     phase_channel_suffix, max_shift_px, align_to_first = args[4], args[5], args[6]
     try:
@@ -389,6 +392,8 @@ def _align_position_wrapper(args):
 
         print(f"ERROR aligning {xy_dir}: {exc}")
         traceback.print_exc()
+        return f"{Path(xy_dir).name}: {exc}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -427,8 +432,7 @@ def run_align(
     data_dir = Path(data_dir)
     raw_im_dir = data_dir / "raw_im"
     if not raw_im_dir.exists():
-        print(f"raw_im/ not found in {data_dir} — run export first")
-        return
+        raise FileNotFoundError(f"raw_im/ not found in {data_dir} — run export first")
 
     xy_dirs = sorted(
         [d for d in data_dir.iterdir() if d.is_dir() and re.match(r"xy\d+$", d.name)],
@@ -436,8 +440,7 @@ def run_align(
     )
 
     if not xy_dirs:
-        print(f"No xy*/ directories found in {data_dir}")
-        return
+        raise FileNotFoundError(f"No xy*/ directories found in {data_dir}")
 
     names = [f.name for f in raw_im_dir.iterdir() if f.is_file()]
     found = {m["base"] for n in names if (m := _TIF_RE.match(n))}
@@ -481,7 +484,7 @@ def run_align(
 
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            list(
+            errors = list(
                 tqdm(
                     pool.map(_align_position_wrapper, args),
                     total=len(args),
@@ -490,15 +493,15 @@ def run_align(
                 )
             )
     else:
-        for xy_dir in tqdm(xy_dirs, desc="Aligning positions", unit="pos"):
-            _align_position(
-                xy_dir,
-                raw_im_dir,
-                basename,
-                align_channel,
-                phase_channel_suffix,
-                max_shift_px,
-                align_to_first,
-            )
+        errors = [
+            _align_position_wrapper(a)
+            for a in tqdm(args, desc="Aligning positions", unit="pos")
+        ]
 
+    failed = [e for e in errors if e]
+    if failed:
+        raise RuntimeError(
+            f"Alignment failed for {len(failed)}/{len(args)} position(s):\n  "
+            + "\n  ".join(failed)
+        )
     print("Alignment complete.")

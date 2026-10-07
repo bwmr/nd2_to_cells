@@ -18,6 +18,7 @@ for division detection, area filtering, and HDF5 output.
 """
 
 import re
+import tomllib
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,12 +28,6 @@ import imageio.v3 as iio
 import numpy as np
 from skimage.measure import regionprops
 from tqdm import tqdm
-
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:
-    import tomli as tomllib  # fallback for 3.10
-
 
 # ---------------------------------------------------------------------------
 # Preset loading
@@ -155,9 +150,11 @@ def _iou_from_labeled(
     labeled_a: np.ndarray,
     label_a: int,
     bbox_a: tuple,
+    area_a: int,
     labeled_b: np.ndarray,
     label_b: int,
     bbox_b: tuple,
+    area_b: int,
 ) -> float:
     """Compute IoU using only the bbox overlap region — no full-frame arrays."""
     inter_bbox = _bbox_intersect(bbox_a, bbox_b)
@@ -170,16 +167,6 @@ def _iou_from_labeled(
     if inter == 0:
         return 0.0
     # Union = area_a + area_b - inter  (faster than materialising full union)
-    area_a = int(
-        np.count_nonzero(
-            labeled_a[bbox_a[0] : bbox_a[2], bbox_a[1] : bbox_a[3]] == label_a
-        )
-    )
-    area_b = int(
-        np.count_nonzero(
-            labeled_b[bbox_b[0] : bbox_b[2], bbox_b[1] : bbox_b[3]] == label_b
-        )
-    )
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
 
@@ -335,8 +322,6 @@ def link_frames_streaming(
 
     for fi in range(1, n_frames):
         frame_cur, path_cur = mask_paths[fi]
-        pass
-
         labeled_cur, regions_cur = _load_clean_frame(path_cur, params)
 
         claimed: set[int] = set()
@@ -359,9 +344,11 @@ def link_frames_streaming(
                         labeled_prev,
                         r0.label,
                         r0.bbox,
+                        r0.area,
                         labeled_cur,
                         r1.label,
                         r1.bbox,
+                        r1.area,
                     )
                     if iou >= params.overlap_limit_min:
                         candidates_iou.append((iou, r1))
@@ -380,7 +367,6 @@ def link_frames_streaming(
                 candidates = sorted(
                     candidates_iou, key=lambda x: -x[0]
                 )  # highest IoU first
-                candidates = [(1.0 / iou, r1) for iou, r1 in candidates]
             elif candidates_fallback:
                 candidates = sorted(candidates_fallback, key=lambda x: x[0])
             else:
@@ -408,10 +394,7 @@ def link_frames_streaming(
                 combined = r1a.area + r1b.area
                 da_div = _normalised_area_change(r0.area, combined)
 
-                if (
-                    params.da_min <= da_div <= params.da_max
-                    and r1b.label not in claimed
-                ):
+                if params.da_min <= da_div <= params.da_max:
                     tracks[tid].divide = True
                     tid_a = next_id
                     next_id += 1
@@ -707,6 +690,16 @@ def _track_position(
         print(f"  [skip] {xy_dir.name}: empty masks/ directory")
         return
 
+    # Missing frames are bridged by the linker; warn since links are less reliable
+    frames = {f for f, _ in mask_paths}
+    missing = [f + 1 for f in range(min(frames), max(frames)) if f not in frames]
+    if missing:
+        shown = ", ".join(map(str, missing[:10])) + (" …" if len(missing) > 10 else "")
+        print(
+            f"  [warn] {xy_dir.name}: {len(missing)} frame(s) missing from masks/ "
+            f"(t = {shown}); tracks are linked across the gap(s)"
+        )
+
     # Masks are kept across re-alignment; warn if images were rewritten since
     phase_tifs = list((xy_dir / "phase").glob("*.tif"))
     if phase_tifs and max(f.stat().st_mtime for f in phase_tifs) > min(
@@ -746,7 +739,8 @@ def _track_position(
                 _flush_track_to_h5(cell_dir, track, buffers[track.track_id], params)
 
 
-def _track_position_wrapper(args):
+def _track_position_wrapper(args) -> str | None:
+    """Run one position; return an error message instead of raising."""
     xy_dir, preset_str, pad, consolidated = args
     try:
         params = load_preset(preset_str)
@@ -756,6 +750,8 @@ def _track_position_wrapper(args):
 
         print(f"ERROR tracking {xy_dir}: {exc}")
         traceback.print_exc()
+        return f"{Path(xy_dir).name}: {exc}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -787,8 +783,7 @@ def run_track(
     )
 
     if not xy_dirs:
-        print(f"No xy*/ directories found in {data_dir}")
-        return
+        raise FileNotFoundError(f"No xy*/ directories found in {data_dir}")
 
     params = load_preset(preset)
     print(
@@ -798,10 +793,10 @@ def run_track(
         f"remove_stray={params.remove_stray})"
     )
 
+    args = [(str(d), preset, pad, consolidated) for d in xy_dirs]
     if workers > 1:
-        args = [(str(d), preset, pad, consolidated) for d in xy_dirs]
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            list(
+            errors = list(
                 tqdm(
                     pool.map(_track_position_wrapper, args),
                     total=len(args),
@@ -810,7 +805,12 @@ def run_track(
                 )
             )
     else:
-        for xy_dir in xy_dirs:
-            _track_position(xy_dir, params, pad, consolidated)
+        errors = [_track_position_wrapper(a) for a in args]
 
+    failed = [e for e in errors if e]
+    if failed:
+        raise RuntimeError(
+            f"Tracking failed for {len(failed)}/{len(args)} position(s):\n  "
+            + "\n  ".join(failed)
+        )
     print("Tracking complete.")

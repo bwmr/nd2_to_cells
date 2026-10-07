@@ -50,7 +50,7 @@ def cli():
     "phase_channel",
     default=0,
     show_default=True,
-    type=int,
+    type=click.IntRange(min=0),
     help="0-based index of the phase-contrast channel in the ND2 file. "
     "All other channels become fluor1, fluor2, ... in order.",
 )
