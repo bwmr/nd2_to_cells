@@ -603,6 +603,15 @@ def _fill_buffers(
         del labeled
 
 
+def _is_complete(track: "Track", params: TrackingParams) -> bool:
+    """Complete cell cycle: born from an observed division, divides, long enough."""
+    return (
+        track.mother_id != 0
+        and track.divide
+        and len(track.frames) >= params.min_cell_age
+    )
+
+
 def _flush_all_tracks_to_h5(
     cell_dir: Path,
     tracks: dict[int, "Track"],
@@ -615,9 +624,7 @@ def _flush_all_tracks_to_h5(
             if track.track_id not in buffers:
                 continue
             buf = buffers[track.track_id]
-            n_frames = len(track.frames)
-            is_complete = track.divide and n_frames >= params.min_cell_age
-            prefix = "Cell" if is_complete else "cell"
+            prefix = "Cell" if _is_complete(track, params) else "cell"
             grp = h5.require_group(f"{prefix}{track.track_id:07d}")
             grp.create_dataset("birth", data=np.int64(track.frames[0] + 1))
             grp.create_dataset("death", data=np.int64(track.frames[-1] + 1))
@@ -643,9 +650,7 @@ def _flush_track_to_h5(
     params: TrackingParams,
 ) -> None:
     """Write one HDF5 file from a pre-filled buffer dict."""
-    n_frames = len(track.frames)
-    is_complete = track.divide and n_frames >= params.min_cell_age
-    prefix = "Cell" if is_complete else "cell"
+    prefix = "Cell" if _is_complete(track, params) else "cell"
     fname = f"{prefix}{track.track_id:07d}.h5"
 
     with h5py.File(cell_dir / fname, "w") as h5:

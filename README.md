@@ -85,7 +85,7 @@ nd2_to_cells track \
     masks/                   Omnipose PNG masks (populated by step 3)
     cell/                    HDF5 output (populated by step 4)
       cell0000001.h5         one file per tracked cell (default)
-      Cell0000002.h5         capital C = complete cell cycle observed
+      Cell0000002.h5         capital C = complete cell cycle (birth + division)
       ...                    or, with --consolidated:
       cells.h5               single file; one group per cell
   xy02/ ...
