@@ -50,6 +50,9 @@ class TrackingParams:
     remove_stray: bool = True
     min_cell_age: int = 5
     search_radius: float = 15.0
+    min_division_age: int = 8
+    min_sister_ratio: float = 0.5
+    confident_iou: float = 0.3
 
 
 def load_preset(preset: str) -> TrackingParams:
@@ -220,10 +223,13 @@ def _merge_small_regions(
     labeled: np.ndarray,
     regions: list[Region],
     params: TrackingParams,
+    merges: dict[int, int],
 ) -> tuple[np.ndarray, list[Region]]:
     """Merge pairs of adjacent sub-threshold regions into one (in place).
 
     Operates on the labeled array directly; no full-frame bool copies.
+    Each merge is recorded in ``merges`` (old label -> kept label) so it can be
+    replayed when masks are re-read for HDF5 output.
     """
     threshold = params.small_area_merge
     small = [r for r in regions if r.area < threshold]
@@ -243,6 +249,7 @@ def _merge_small_regions(
             if r1 < or0 - 1 or or1 < r0 - 1 or c1 < oc0 - 1 or oc1 < c0 - 1:
                 continue
             labeled[labeled == other.label] = r.label
+            merges[other.label] = r.label
             merged.add(other.label)
             break
 
@@ -283,10 +290,25 @@ def _normalised_area_change(area_t: int, area_t1: int) -> float:
     return (area_t1 - area_t) / area_t1
 
 
+def _merge_region_pair(labeled: np.ndarray, keep: Region, drop: Region) -> Region:
+    """Relabel ``drop`` as ``keep`` in place and return the combined Region."""
+    labeled[labeled == drop.label] = keep.label
+    area = keep.area + drop.area
+    return Region(
+        label=keep.label,
+        area=area,
+        centroid=(
+            (keep.centroid[0] * keep.area + drop.centroid[0] * drop.area) / area,
+            (keep.centroid[1] * keep.area + drop.centroid[1] * drop.area) / area,
+        ),
+        bbox=_union_bbox([keep.bbox, drop.bbox]),
+    )
+
+
 def link_frames_streaming(
     mask_paths: list[tuple[int, Path]],
     params: TrackingParams,
-) -> dict[int, Track]:
+) -> tuple[dict[int, Track], dict[int, dict[int, int]]]:
     """Link regions across all frames, loading only two frames at a time.
 
     Args:
@@ -294,9 +316,12 @@ def link_frames_streaming(
         params:     Tracking parameters.
 
     Returns:
-        Dict mapping track_id -> Track (scalars only, no arrays).
+        (tracks, merges): dict mapping track_id -> Track (scalars only, no
+        arrays), and dict mapping frame -> {old_label: kept_label} for every
+        region merge applied to that frame's labeled mask during linking.
     """
     tracks: dict[int, Track] = {}
+    merges: dict[int, dict[int, int]] = {}
     next_id = 1
     active: dict[int, int] = {}  # label_in_current_frame -> track_id
 
@@ -308,7 +333,7 @@ def link_frames_streaming(
     regions_prev = _extract_regions(labeled_prev, params)
     regions_prev = _apply_area_filters(regions_prev, params)
     labeled_prev, regions_prev = _merge_small_regions(
-        labeled_prev, regions_prev, params
+        labeled_prev, regions_prev, params, merges.setdefault(frame_0, {})
     )
 
     # Initialise tracks for first frame
@@ -332,12 +357,29 @@ def link_frames_streaming(
         labeled_cur = _load_mask(path_cur)
         regions_cur = _extract_regions(labeled_cur, params)
         regions_cur = _apply_area_filters(regions_cur, params)
+        frame_merges = merges.setdefault(frame_cur, {})
         labeled_cur, regions_cur = _merge_small_regions(
-            labeled_cur, regions_cur, params
+            labeled_cur, regions_cur, params, frame_merges
         )
 
         claimed: set[int] = set()
         new_active: dict[int, int] = {}
+
+        def _continue(tid: int, r1: Region) -> None:
+            tracks[tid].frames.append(frame_cur)
+            tracks[tid].labels.append(r1.label)
+            tracks[tid].bboxes.append(r1.bbox)
+            tracks[tid].areas.append(r1.area)
+            new_active[r1.label] = tid
+            claimed.add(r1.label)
+
+        def _accept_link(r0: Region, r1: Region, iou: float) -> bool:
+            # A confident overlap is the same cell even if segmentation
+            # changed its area a lot; da limits only gate ambiguous links.
+            if iou >= params.confident_iou:
+                return True
+            da = _normalised_area_change(r0.area, r1.area)
+            return params.da_min <= da <= params.da_max
 
         for r0 in regions_prev:
             tid = active.get(r0.label)
@@ -372,14 +414,17 @@ def link_frames_streaming(
                 if dist <= params.search_radius:
                     candidates_fallback.append((dist, r1))
 
-            # Prefer IoU candidates (sort best-first); fall back to centroid
+            # Prefer IoU candidates (sort best-first); fall back to centroid.
+            # Candidates are (iou, region); fallback candidates have iou 0.
             if candidates_iou:
                 candidates = sorted(
                     candidates_iou, key=lambda x: -x[0]
                 )  # highest IoU first
-                candidates = [(1.0 / iou, r1) for iou, r1 in candidates]
             elif candidates_fallback:
-                candidates = sorted(candidates_fallback, key=lambda x: x[0])
+                candidates = [
+                    (0.0, r1)
+                    for _, r1 in sorted(candidates_fallback, key=lambda x: x[0])
+                ]
             else:
                 candidates = []
 
@@ -387,15 +432,9 @@ def link_frames_streaming(
                 pass  # track ends naturally
 
             elif len(candidates) == 1:
-                _, r1 = candidates[0]
-                da = _normalised_area_change(r0.area, r1.area)
-                if params.da_min <= da <= params.da_max:
-                    tracks[tid].frames.append(frame_cur)
-                    tracks[tid].labels.append(r1.label)
-                    tracks[tid].bboxes.append(r1.bbox)
-                    tracks[tid].areas.append(r1.area)
-                    new_active[r1.label] = tid
-                    claimed.add(r1.label)
+                iou, r1 = candidates[0]
+                if _accept_link(r0, r1, iou):
+                    _continue(tid, r1)
                 # else: track ends (area change too extreme, not a continuation)
 
             else:
@@ -404,11 +443,22 @@ def link_frames_streaming(
                 _, r1b = candidates[1]
                 combined = r1a.area + r1b.area
                 da_div = _normalised_area_change(r0.area, combined)
+                area_fits = params.da_min <= da_div <= params.da_max
 
-                if (
-                    params.da_min <= da_div <= params.da_max
-                    and r1b.label not in claimed
-                ):
+                # A real division needs a mother old enough to have completed a
+                # cycle (unless born before the movie started) and similar-sized
+                # sisters; otherwise the split is segmentation flicker.
+                mother = tracks[tid]
+                old_enough = (
+                    mother.frames[0] == frame_0
+                    or len(mother.frames) >= params.min_division_age
+                )
+                sisters_similar = (
+                    min(r1a.area, r1b.area) / max(r1a.area, r1b.area)
+                    >= params.min_sister_ratio
+                )
+
+                if area_fits and old_enough and sisters_similar:
                     tracks[tid].divide = True
                     tid_a = next_id
                     next_id += 1
@@ -429,17 +479,22 @@ def link_frames_streaming(
                         )
                         new_active[r1_d.label] = tid_d
                         claimed.add(r1_d.label)
+                elif area_fits and candidates_iou:
+                    # Rejected division of two overlapping pieces: re-join them
+                    # and keep the mother's identity.
+                    merged = _merge_region_pair(labeled_cur, r1a, r1b)
+                    frame_merges[r1b.label] = r1a.label
+                    regions_cur = [
+                        merged if r.label == r1a.label else r
+                        for r in regions_cur
+                        if r.label != r1b.label
+                    ]
+                    _continue(tid, merged)
                 else:
                     # Not a division — link to best candidate that passes da filter
-                    for _, r1 in candidates:
-                        da = _normalised_area_change(r0.area, r1.area)
-                        if params.da_min <= da <= params.da_max:
-                            tracks[tid].frames.append(frame_cur)
-                            tracks[tid].labels.append(r1.label)
-                            tracks[tid].bboxes.append(r1.bbox)
-                            tracks[tid].areas.append(r1.area)
-                            new_active[r1.label] = tid
-                            claimed.add(r1.label)
+                    for iou, r1 in candidates:
+                        if _accept_link(r0, r1, iou):
+                            _continue(tid, r1)
                             break
 
         # New regions with no predecessor
@@ -473,7 +528,7 @@ def link_frames_streaming(
             if not (not t.has_predecessor and len(t.frames) == 1 and not t.divide)
         }
 
-    return tracks
+    return tracks, merges
 
 
 # ---------------------------------------------------------------------------
@@ -568,11 +623,13 @@ def _fill_buffers(
     mask_paths: list[tuple[int, Path]],
     tracks: dict[int, "Track"],
     buffers: dict[int, dict],
+    merges: dict[int, dict[int, int]],
 ) -> None:
     """Single pass over mask PNGs: load each frame once, fill all active crops.
 
     Builds the frame -> [track_id] inverted index internally so the caller
-    doesn't need to manage it.
+    doesn't need to manage it. Region merges made during linking are replayed
+    on each frame (in the order they were made) before cropping.
     """
     from collections import defaultdict
 
@@ -588,6 +645,8 @@ def _fill_buffers(
         if not tids:
             continue
         labeled = _load_mask(path)
+        for old, kept in merges.get(abs_frame, {}).items():
+            labeled[labeled == old] = kept
         for tid in tids:
             track = tracks[tid]
             buf = buffers[tid]
@@ -699,11 +758,11 @@ def _track_position(
     img_shape = _load_mask(mask_paths[0][1]).shape[:2]
 
     print(f"  {xy_dir.name}: linking {len(mask_paths)} frames...")
-    tracks = link_frames_streaming(mask_paths, params)
+    tracks, merges = link_frames_streaming(mask_paths, params)
     print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 file(s)...")
 
     buffers = _alloc_track_buffers(tracks, img_shape, pad)
-    _fill_buffers(mask_paths, tracks, buffers)
+    _fill_buffers(mask_paths, tracks, buffers, merges)
     if consolidated:
         _flush_all_tracks_to_h5(cell_dir, tracks, buffers, params)
     else:
