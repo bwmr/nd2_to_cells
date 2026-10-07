@@ -17,14 +17,16 @@ Two registration modes (controlled by align_to_first):
     Clamping (max_shift_px) applies per step to reject outlier frames.
 
 Algorithm:
-    1. Read source TIFFs from raw_im/, grouped by xy position and channel suffix.
+    1. Read source TIFFs ({basename}_t{T}xy{P}c{C}.tif) from raw_im/, grouped by
+       xy position and channel suffix. Other files in raw_im/ are ignored.
     2. Compute shifts from the align_channel using phase_cross_correlation
        (upsample_factor=100).
     3. Clamp shifts exceeding max_shift_px to 0 (sequential mode only).
     4. Compute the padded canvas size from good-frame shifts.
     5. Place each frame in the padded canvas (integer shift), then apply the
        fractional residual via scipy.ndimage.shift (spline interpolation) for
-       subpixel accuracy. Write aligned TIFFs to xy{P}/{subdir}/.
+       subpixel accuracy. Existing xy{P}/phase/ and xy{P}/fluor*/ are removed,
+       then aligned TIFFs are written to xy{P}/{subdir}/.
        raw_im/ is left untouched. One frame loaded at a time.
 
 Memory: at most 2 frames held in RAM simultaneously.
@@ -32,6 +34,7 @@ Memory: at most 2 frames held in RAM simultaneously.
 
 import math
 import re
+import shutil
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -46,23 +49,39 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 
 
+# 2D export filenames: {basename}_t{T}xy{P}c{C}.tif (Z-slice files do not match)
+_TIF_RE = re.compile(
+    r"^(?P<base>.+)_t(?P<t>\d+)xy(?P<p>\d+)c(?P<c>\d+)\.tiff?$", re.IGNORECASE
+)
+_SLICE_HINT_RE = re.compile(r"xy\d+z\d+c\d+\.tiff?$", re.IGNORECASE)
+
+
+def resolve_basename(found: set[str], basename: str | None, raw_im_dir: Path) -> str:
+    """Pick the export basename to process from the basenames found in raw_im/.
+
+    Uses `basename` if given; otherwise requires exactly one basename present.
+    """
+    if basename is not None:
+        if basename not in found:
+            raise FileNotFoundError(
+                f"No files with basename {basename!r} in {raw_im_dir} "
+                f"(found: {sorted(found)})"
+            )
+        return basename
+    if len(found) != 1:
+        raise ValueError(
+            f"Multiple basenames in {raw_im_dir}: {sorted(found)}. "
+            "Pass --basename to choose one."
+        )
+    return next(iter(found))
+
+
 def _parse_frame_number(fname: str) -> int:
     """Extract the frame number from a TIFF filename."""
     m = re.search(r"_t(\d+)xy", fname)
     if m is None:
         raise ValueError(f"Cannot parse frame number from filename: {fname!r}")
     return int(m.group(1))
-
-
-def _parse_xy_str(fname: str) -> str:
-    """Extract the zero-padded xy position string.
-
-    e.g. '260430_t001xy01c1.tif' -> '01'
-    """
-    m = re.search(r"xy(\d+)c", fname)
-    if m is None:
-        raise ValueError(f"Cannot parse xy position from filename: {fname!r}")
-    return m.group(1)
 
 
 def _parse_channel_suffix(fname: str) -> int:
@@ -149,6 +168,7 @@ def _apply_shift(
 def _align_position(
     xy_dir: Path,
     raw_im_dir: Path,
+    basename: str,
     align_channel: str,
     phase_channel_suffix: int,
     max_shift_px: float = 50.0,
@@ -156,13 +176,14 @@ def _align_position(
 ) -> None:
     """Align all frames for one xy position.
 
-    Reads source TIFFs from raw_im_dir (filtered by xy position string).
-    Writes aligned TIFFs to xy_dir/{subdir}/, creating subdirs as needed.
-    raw_im_dir is left untouched.
+    Reads source TIFFs from raw_im_dir (filtered by basename and xy position).
+    Removes existing phase/ and fluor*/ subdirs of xy_dir, then writes aligned
+    TIFFs to xy_dir/{subdir}/. raw_im_dir is left untouched.
 
     Args:
         xy_dir:               Path to the xy*/ output directory.
         raw_im_dir:           Path to raw_im/ directory (source TIFFs).
+        basename:             Export basename; other files in raw_im/ are ignored.
         align_channel:        Subdirectory name used to compute shifts (e.g. 'phase').
         phase_channel_suffix: c-suffix integer that maps to the 'phase' subdirectory.
         max_shift_px:         Shifts larger than this (pixels) are clamped to 0.
@@ -175,7 +196,7 @@ def _align_position(
     all_tifs = [
         f
         for f in raw_im_dir.iterdir()
-        if f.suffix.lower() in (".tif", ".tiff") and _parse_xy_str(f.name) == xy_str
+        if (m := _TIF_RE.match(f.name)) and m["base"] == basename and m["p"] == xy_str
     ]
     if not all_tifs:
         print(f"  [skip] {xy_dir.name}: no TIFFs found in {raw_im_dir}")
@@ -186,6 +207,16 @@ def _align_position(
     by_suffix: dict[int, list[Path]] = {s: [] for s in all_suffixes}
     for f in all_tifs:
         by_suffix[_parse_channel_suffix(f.name)].append(f)
+
+    # Guard against e.g. t1 and t01 from re-exports with different zero-padding
+    for s, files in by_suffix.items():
+        frames = [_parse_frame_number(f.name) for f in files]
+        dupes = sorted({t for t in frames if frames.count(t) > 1})
+        if dupes:
+            raise ValueError(
+                f"{xy_dir.name} c{s}: duplicate frame number(s) {dupes} in "
+                f"{raw_im_dir} — remove stale exports"
+            )
 
     # Identify the reference channel suffix for shift computation
     ref_suffix = next(
@@ -255,6 +286,11 @@ def _align_position(
     canvas_shape = (canvas_h, canvas_w)
 
     # --- Step 3: apply shifts to every channel, write to xy_dir/{subdir}/ ---
+    # Clear previous output first so stale frames or channels don't survive
+    for d in xy_dir.iterdir():
+        if d.is_dir() and re.fullmatch(r"phase|fluor\d+", d.name):
+            shutil.rmtree(d)
+
     for suffix in all_suffixes:
         ch_tifs = _sorted_tifs(by_suffix[suffix])
         if len(ch_tifs) != n_frames:
@@ -292,12 +328,13 @@ def _align_position(
 
 def _align_position_wrapper(args):
     """Top-level wrapper for ProcessPoolExecutor (must be picklable)."""
-    xy_dir, raw_im_dir, align_channel = args[0], args[1], args[2]
-    phase_channel_suffix, max_shift_px, align_to_first = args[3], args[4], args[5]
+    xy_dir, raw_im_dir, basename, align_channel = args[0], args[1], args[2], args[3]
+    phase_channel_suffix, max_shift_px, align_to_first = args[4], args[5], args[6]
     try:
         _align_position(
             Path(xy_dir),
             Path(raw_im_dir),
+            basename,
             align_channel,
             phase_channel_suffix,
             max_shift_px,
@@ -322,6 +359,7 @@ def run_align(
     workers: int = 1,
     max_shift_px: float = 50.0,
     align_to_first: bool = False,
+    basename: str | None = None,
 ) -> None:
     """Drift-correct all xy positions in data_dir.
 
@@ -339,6 +377,8 @@ def run_align(
                               avoids compounding of subpixel errors over long
                               movies. If False, use sequential
                               frame-to-frame registration.
+        basename:             Export basename to align. If None, raw_im/ must
+                              contain exactly one basename.
     """
     data_dir = Path(data_dir)
     raw_im_dir = data_dir / "raw_im"
@@ -355,9 +395,29 @@ def run_align(
         print(f"No xy*/ directories found in {data_dir}")
         return
 
+    names = [f.name for f in raw_im_dir.iterdir() if f.is_file()]
+    found = {m["base"] for n in names if (m := _TIF_RE.match(n))}
+    if not found:
+        hint = (
+            " (found Z-slice TIFFs — use 'assemble' instead)"
+            if any(_SLICE_HINT_RE.search(n) for n in names)
+            else ""
+        )
+        raise FileNotFoundError(f"No '*_t*xy*c*.tif' files found in {raw_im_dir}{hint}")
+    basename = resolve_basename(found, basename, raw_im_dir)
+    n_ignored = sum(
+        1 for n in names if not ((m := _TIF_RE.match(n)) and m["base"] == basename)
+    )
+    if n_ignored:
+        print(
+            f"Ignoring {n_ignored} file(s) in raw_im/ not matching "
+            f"'{basename}_t*xy*c*.tif'"
+        )
+
     mode = "align-to-first" if align_to_first else "sequential"
     print(
-        f"Aligning {len(xy_dirs)} position(s) using channel '{align_channel}' "
+        f"Aligning {len(xy_dirs)} position(s) of '{basename}' "
+        f"using channel '{align_channel}' "
         f"(mode={mode}, max_shift_px={max_shift_px}, "
         f"phase_suffix=c{phase_channel_suffix})..."
     )
@@ -366,6 +426,7 @@ def run_align(
         (
             str(d),
             str(raw_im_dir),
+            basename,
             align_channel,
             phase_channel_suffix,
             max_shift_px,
@@ -389,6 +450,7 @@ def run_align(
             _align_position(
                 xy_dir,
                 raw_im_dir,
+                basename,
                 align_channel,
                 phase_channel_suffix,
                 max_shift_px,

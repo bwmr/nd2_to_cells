@@ -98,6 +98,22 @@ nd2_to_cells track \
 | `--z-project mean\|max` | `mean` | Z-projection method applied when the ND2 contains a Z-stack. Ignored when `--export-z-slices` is set. |
 | `--export-z-slices` | off | Write each Z slice as a separate TIFF instead of projecting. Output files are named `{basename}_t{T}xy{P}z{Z}c{C}.tif`. |
 
+## Align options
+
+`align` reads `{basename}_t{T}xy{P}c{C}.tif` files from `raw_im/` and writes
+drift-corrected TIFFs into `xy{P}/phase/`, `xy{P}/fluor1/`, … Existing
+`phase/` and `fluor*/` folders are removed before writing. Other files in
+`raw_im/` are ignored.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--data DIR` | required | Experiment directory containing `raw_im/` and `xy*/`. |
+| `--basename STR` | auto | Filename prefix used during export. Required only if `raw_im/` contains more than one basename. |
+| `--align-channel NAME` | `phase` | Channel used to compute shifts. |
+| `--align-to-first` | off | Register every frame against frame 1 instead of the previous frame. |
+| `--max-shift-px N` | `50` | Sequential mode only: larger frame-to-frame shifts are set to 0. |
+| `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
+
 ## Assemble options
 
 `assemble` is used in place of `align` for Z-stack data. It reads the
@@ -107,7 +123,7 @@ per-slice TIFFs produced by `export --export-z-slices` and writes one
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--data DIR` | required | Experiment directory containing `raw_im/` and `xy*/`. |
-| `--basename STR` | required | Filename prefix used during export (e.g. `260430`). |
+| `--basename STR` | auto | Filename prefix used during export (e.g. `260430`). Required only if `raw_im/` contains Z-slice TIFFs of more than one basename. |
 | `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
 
 ## HDF5 cell file layout

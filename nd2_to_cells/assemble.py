@@ -29,11 +29,15 @@ import imageio.v3 as iio
 import numpy as np
 from tqdm import tqdm
 
+from .align import resolve_basename
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SLICE_RE = re.compile(r"_t(?P<t>\d+)xy(?P<p>\d+)z(?P<z>\d+)c(?P<c>\d+)\.tif$")
+_SLICE_RE = re.compile(
+    r"^(?P<base>.+)_t(?P<t>\d+)xy(?P<p>\d+)z(?P<z>\d+)c(?P<c>\d+)\.tif$"
+)
 
 
 def _channel_subdir(c_suffix: int) -> str:
@@ -82,14 +86,15 @@ def _assemble_position_wrapper(args: tuple) -> None:
 
 def run_assemble(
     data_dir: str,
-    basename: str,
+    basename: str | None = None,
     workers: int = 1,
 ) -> None:
     """Assemble per-Z-slice TIFFs into per-timepoint ZYX stacks.
 
     Args:
         data_dir: Root experiment directory containing raw_im/ and xy*/.
-        basename: Filename prefix used during export (e.g. '260430').
+        basename: Filename prefix used during export (e.g. '260430'). If None,
+                  raw_im/ must contain Z-slice TIFFs of exactly one basename.
         workers:  Number of parallel worker processes (one per xy position).
     """
     data_dir = Path(data_dir)
@@ -98,23 +103,27 @@ def run_assemble(
     if not raw_im_dir.exists():
         raise FileNotFoundError(f"raw_im/ not found in {data_dir}")
 
-    # Discover all per-slice TIFFs for this basename.
-    slice_files = sorted(raw_im_dir.glob(f"{basename}_t*xy*z*c*.tif"))
-    if not slice_files:
+    # Discover all per-slice TIFFs, then restrict to one basename.
+    matches = [
+        (path, m)
+        for path in sorted(raw_im_dir.iterdir())
+        if (m := _SLICE_RE.match(path.name))
+    ]
+    if not matches:
         raise FileNotFoundError(
-            f"No z-slice TIFFs matching '{basename}_t*xy*z*c*.tif' "
+            f"No z-slice TIFFs matching '*_t*xy*z*c*.tif' "
             f"found in {raw_im_dir}. "
             "Run 'nd2_to_cells export --export-z-slices' first."
         )
+    basename = resolve_basename({m["base"] for _, m in matches}, basename, raw_im_dir)
+    matches = [(path, m) for path, m in matches if m["base"] == basename]
+    slice_files = [path for path, _ in matches]
 
     # Group files by xy position string, then by (t_str, c_suffix).
     # per_pos[xy_str][(t_str, c_suffix)] = [(z_int, path), ...]
     per_pos: dict[str, dict] = defaultdict(lambda: defaultdict(list))
 
-    for path in slice_files:
-        m = _SLICE_RE.search(path.name)
-        if m is None:
-            continue
+    for path, m in matches:
         t_str = m.group("t")
         p_str = m.group("p")
         z_int = int(m.group("z"))

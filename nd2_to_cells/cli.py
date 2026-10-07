@@ -132,7 +132,14 @@ def export_cmd(
     help="Register all frames against the first frame, instead of the default"
     "sequential mode.",
 )
-def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
+@click.option(
+    "--basename",
+    default=None,
+    type=str,
+    help="Filename prefix used during export (e.g. '260430'). "
+    "Optional if raw_im/ contains exactly one basename.",
+)
+def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first, basename):
     """Correct stage drift across frames for all xy positions.
 
     Output frames will be saved to channel-specific subfolders in the xy{N}/ directory.
@@ -143,6 +150,8 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
     Use align-to-first flag to align frames directly against frame 0. This avoids
     compounding of subpixel errors over long movies.
 
+    Existing phase/ and fluor*/ folders in each xy{N}/ are removed before
+    writing.
     """
     run_align(
         data_dir=data_dir,
@@ -150,6 +159,7 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
         workers=workers,
         max_shift_px=max_shift_px,
         align_to_first=align_to_first,
+        basename=basename,
     )
 
 
@@ -164,9 +174,10 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
 )
 @click.option(
     "--basename",
-    required=True,
+    default=None,
     type=str,
-    help="Filename prefix used during export (e.g. '260430').",
+    help="Filename prefix used during export (e.g. '260430'). "
+    "Optional if raw_im/ contains Z-slice TIFFs of exactly one basename.",
 )
 @click.option(
     "--workers",
