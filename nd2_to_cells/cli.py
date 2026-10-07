@@ -191,7 +191,8 @@ def assemble_cmd(data_dir, basename, workers):
 
     Reads per-slice TIFFs from raw_im/ (written by export --export-z-slices),
     groups them by position × timepoint × channel, and writes one ZYX TIFF
-    per group into xy{N}/{channel}/.
+    per group into xy{N}/{channel}/. Existing phase/ and fluor*/ folders in
+    each xy{N}/ are removed before writing.
 
     Use this instead of align when working with Z-stack data:
 

@@ -17,6 +17,8 @@ Output filename pattern (one ZYX TIFF per timepoint × channel):
 
 where channel = 'phase' for c=1, 'fluor1' for c=2, 'fluor2' for c=3, …
 
+Existing xy{P}/phase/ and xy{P}/fluor*/ are removed before writing.
+
 Memory: one timepoint's Z-stack (Z frames of Y×X) held at a time.
 """
 
@@ -29,7 +31,7 @@ import imageio.v3 as iio
 import numpy as np
 from tqdm import tqdm
 
-from .align import resolve_basename
+from .align import clear_channel_dirs, resolve_basename
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -58,6 +60,9 @@ def _assemble_position(
     slices_by_tc: {(t_str, c_suffix): [(z_int, path), ...]}
     """
     xy_dir = data_dir / f"xy{xy_str}"
+    # Clear previous output first so stale frames or channels don't survive
+    if xy_dir.exists():
+        clear_channel_dirs(xy_dir)
 
     # Collect unique (t_str, c_suffix) keys and sort for determinism.
     for (t_str, c_suffix), z_entries in sorted(slices_by_tc.items()):

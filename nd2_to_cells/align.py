@@ -76,6 +76,13 @@ def resolve_basename(found: set[str], basename: str | None, raw_im_dir: Path) ->
     return next(iter(found))
 
 
+def clear_channel_dirs(xy_dir: Path) -> None:
+    """Remove phase/ and fluor*/ subdirs of xy_dir (masks/ and cell/ are kept)."""
+    for d in xy_dir.iterdir():
+        if d.is_dir() and re.fullmatch(r"phase|fluor\d+", d.name):
+            shutil.rmtree(d)
+
+
 def _parse_frame_number(fname: str) -> int:
     """Extract the frame number from a TIFF filename."""
     m = re.search(r"_t(\d+)xy", fname)
@@ -287,9 +294,7 @@ def _align_position(
 
     # --- Step 3: apply shifts to every channel, write to xy_dir/{subdir}/ ---
     # Clear previous output first so stale frames or channels don't survive
-    for d in xy_dir.iterdir():
-        if d.is_dir() and re.fullmatch(r"phase|fluor\d+", d.name):
-            shutil.rmtree(d)
+    clear_channel_dirs(xy_dir)
 
     for suffix in all_suffixes:
         ch_tifs = _sorted_tifs(by_suffix[suffix])

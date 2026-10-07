@@ -118,7 +118,8 @@ drift-corrected TIFFs into `xy{P}/phase/`, `xy{P}/fluor1/`, … Existing
 
 `assemble` is used in place of `align` for Z-stack data. It reads the
 per-slice TIFFs produced by `export --export-z-slices` and writes one
-**ZYX** TIFF per timepoint × channel into `xy{P}/{channel}/`.
+**ZYX** TIFF per timepoint × channel into `xy{P}/{channel}/`. Existing
+`phase/` and `fluor*/` folders are removed before writing.
 
 | Flag | Default | Description |
 |------|---------|-------------|
