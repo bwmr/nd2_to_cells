@@ -12,7 +12,7 @@ from .track import run_track
 def cli():
     """nd2_to_cells: ND2 microscopy files → per-cell HDF5 files.
 
-    Three sequential subcommands:
+    Subcommands (run in order; use assemble instead of align for Z-slice exports):
 
     \b
       export    — split ND2 into per-position TIFFs
@@ -77,7 +77,7 @@ def export_cmd(
 
     Creates SuperSegger-like folder and exports frames to raw_im/ directory.
 
-    Files will be names {basename}_t{???}_xy{??}_c{?}.tif.
+    Files are named {basename}_t{T}xy{P}c{C}.tif.
     Also creates one xy{N}/ subdirectory per microscope position, each containing:
 
     \b
@@ -121,7 +121,7 @@ def export_cmd(
     default=50.0,
     show_default=True,
     type=float,
-    help="Shifts larger than this (pixels) are clamped to 0. "
+    help="Sequential mode only: shifts larger than this (pixels) are clamped to 0. "
     "Guards against spurious large shifts from blurry or artifact frames.",
 )
 @click.option(
@@ -129,7 +129,7 @@ def export_cmd(
     "align_to_first",
     is_flag=True,
     default=False,
-    help="Register all frames against the first frame, instead of the default"
+    help="Register all frames against the first frame, instead of the default "
     "sequential mode.",
 )
 @click.option(
@@ -197,7 +197,9 @@ def assemble_cmd(data_dir, basename, workers):
     Use this instead of align when working with Z-stack data:
 
     \b
-      export --export-z-slices  →  assemble  →  track
+      export --export-z-slices  →  assemble
+
+    Segmentation and tracking of Z-stack data are not supported.
     """
     run_assemble(
         data_dir=data_dir,

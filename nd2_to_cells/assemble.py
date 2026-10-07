@@ -6,8 +6,8 @@ timepoint × channel, and writes one ZYX TIFF per group into the
 appropriate channel subdirectory under xy{P}/.
 
 This is the Z-stack equivalent of the align step and produces output in
-the same locations (xy{P}/phase/, xy{P}/fluor1/, …) so that track can
-consume it unchanged.
+the same locations (xy{P}/phase/, xy{P}/fluor1/, …). No drift correction is
+applied, and segmentation/tracking of Z-stack data is not supported.
 
 Input filename pattern (from export --export-z-slices):
     {basename}_t{T}xy{P}z{Z}c{C}.tif

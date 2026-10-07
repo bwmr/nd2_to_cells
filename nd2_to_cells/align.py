@@ -2,14 +2,14 @@
 
 Two registration modes (controlled by align_to_first):
 
-  align_to_first=True (default):
+  align_to_first=True:
     Every frame is registered directly against frame 0. The shift for
     each frame is measured independently, so subpixel noise does not
     compound across frames. This is the most robust mode for long movies
     with slow, monotonic drift — it matches SuperSegger's AlignToFirst
     option. Recommended when drift is small relative to the frame interval.
 
-  align_to_first=False (sequential):
+  align_to_first=False (sequential, default):
     Each frame is registered against the previous frame (frame-to-frame).
     Useful when drift between consecutive frames is large (fast drift or
     slow frame rate) and a direct frame-0 comparison would be unreliable.
@@ -374,8 +374,7 @@ def run_align(
         data_dir:             Directory containing xy*/ subdirectories and raw_im/.
         align_channel:        Subdirectory name used to compute shifts (e.g. 'phase').
         phase_channel_suffix: c-suffix integer in filenames that maps to 'phase'
-                              (must match --phase-channel used during export; default 1,
-                              which corresponds to --phase-channel 0 in export).
+                              (export always writes phase as c1).
         workers:              Number of parallel worker processes.
         max_shift_px:         Shifts larger than this (px) are clamped to 0.
         align_to_first:       If True, register each frame against frame 0 -

@@ -4,10 +4,12 @@ Algorithm (per xy position):
     1. Enumerate mask file paths sorted by frame number (never load all at once).
     2. Stream frame pairs: load frame t and t+1, extract region properties,
        apply area filters and small-region merging, link, then discard t.
-    3. Write per-cell HDF5 files by re-reading only the frames each cell
-       was alive in (one frame at a time, never the full stack in memory).
+    3. Single pass over the masks, re-applying the same filtering and merging,
+       filling crop buffers for all tracks; then write HDF5 output.
 
-Memory design: at most 2 full labeled frames are held in RAM simultaneously.
+Memory design: linking holds at most 2 full labeled frames in RAM. Writing
+holds one frame plus crop buffers for all tracks until the end, so memory
+grows with movie length x cell count.
 Region objects store only scalars (label, area, centroid, bbox) — no arrays.
 IoU is computed on the fly from label equality within the bbox overlap region.
 

@@ -61,21 +61,19 @@ nd2_to_cells assemble \
   --data /data/experiment/ \
   --basename 260430 \
   --workers 4
-
-# 3. Run Omnipose (external, unchanged — targets xy{N}/phase/ as normal)
-
-# 4. Track cells and write HDF5 output (unchanged)
-nd2_to_cells track \
-  --data /data/experiment/ \
-  --preset 100XEc \
-  --workers 4
 ```
+
+Caveats for the Z-stack workflow:
+
+- `assemble` does **no drift correction**.
+- Segmentation and tracking of Z-stack (3D+T) data are not supported; the
+  workflow ends with the ZYX stacks in `xy{P}/phase/`, `xy{P}/fluor1/`, …
 
 ## Output layout
 
 ```
 /data/experiment/
-  raw_im/                    pre-alignment TIFF copies
+  raw_im/                    exported TIFFs (input to align/assemble)
                              (Z-stack files named …_t{T}xy{P}z{Z}c{C}.tif
                               when --export-z-slices is used)
   xy01/
@@ -128,6 +126,21 @@ per-slice TIFFs produced by `export --export-z-slices` and writes one
 | `--basename STR` | auto | Filename prefix used during export (e.g. `260430`). Required only if `raw_im/` contains Z-slice TIFFs of more than one basename. |
 | `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
 
+## Track options
+
+`track` reads Omnipose masks from `xy{P}/masks/` and writes HDF5 output to
+`xy{P}/cell/`. Previous `cell*.h5`, `Cell*.h5` and `cells.h5` files there are
+replaced; `masks/` is never modified. A warning is printed if `phase/` images
+are newer than the masks.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--data DIR` | required | Experiment directory containing `xy*/`. |
+| `--preset NAME\|PATH` | `100XEc` | Preset name from `presets/` or path to a custom `.toml` file. |
+| `--pad N` | `5` | Padding in pixels added around each cell's bounding box. |
+| `--consolidated` | off | Write one `cells.h5` per position (one group per cell) instead of one file per cell. |
+| `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
+
 ## HDF5 cell file layout
 
 In the default mode each `cell{ID:07d}.h5` contains the datasets below at the
@@ -146,10 +159,13 @@ Each cell contains:
 | `sisterID` | int64       | scalar   | Track ID of sister cell (0 = none)         |
 | `daughterID` | int64     | (0,) or (2,) | Track IDs of daughter cells           |
 | `frames`   | int64       | (T,)     | 0-based absolute frame indices             |
-| `BB`       | int32       | (T, 4)   | Padded bbox per frame [x1, y1, w, h]       |
-| `r_offset` | int32       | (T, 2)   | Top-left of padded crop [x, y]             |
-| `edgeFlag` | bool        | (T,)     | True if crop touches image boundary        |
+| `BB`       | int32       | (T, 4)   | Per-frame cell bbox (unpadded), relative to crop top-left [x, y, w, h] |
+| `r_offset` | int32       | (T, 2)   | Top-left of padded crop in image [x, y] (same for all frames) |
+| `edgeFlag` | bool        | (T,)     | True if padded crop touches the image edge (same for all frames)¹ |
 | `mask`     | bool        | (H, W, T)| Binary Omnipose mask in consensus crop     |
+
+¹ After `align`, the image edge is the padded canvas edge, not where real
+pixels end.
 
 ## Presets
 
@@ -159,5 +175,5 @@ Tracking parameters are stored in `presets/` as TOML files. Available presets:
 - `100XPa` — *P. aeruginosa*, 100x objective, 60 nm/px
 
 Parameters are derived from the corresponding SuperSegger `.mat` preset files.
-Custom presets can be added by placing a `.toml` file in the `presets/` directory
-and passing `--preset /path/to/custom.toml`.
+Pass a preset name (`--preset 100XEc`, looked up in `presets/`) or a path to
+your own `.toml` (`--preset /path/to/custom.toml`).
