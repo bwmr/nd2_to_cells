@@ -40,6 +40,7 @@ nd2_to_cells track \
   --preset 100XEc \
   --workers 4
 # add --consolidated to write one cells.h5 per position instead of one file per cell
+# previous HDF5 output in xy*/cell/ is replaced; masks/ is never modified
 ```
 
 ### Z-stack workflow (alternative to align)

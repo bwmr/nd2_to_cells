@@ -253,6 +253,9 @@ def track_cmd(data_dir, preset, workers, pad, consolidated):
 
     With --consolidated, writes a single cells.h5 per position where each
     cell is stored as a group (e.g. cells.h5/Cell0000002/mask).
+
+    Previous cell*.h5 / Cell*.h5 / cells.h5 files in xy{N}/cell/ are removed
+    before writing. Warns if phase/ images are newer than the masks.
     """
     run_track(
         data_dir=data_dir,

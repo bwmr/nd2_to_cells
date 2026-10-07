@@ -700,6 +700,16 @@ def _track_position(
         print(f"  [skip] {xy_dir.name}: empty masks/ directory")
         return
 
+    # Masks are kept across re-alignment; warn if images were rewritten since
+    phase_tifs = list((xy_dir / "phase").glob("*.tif"))
+    if phase_tifs and max(f.stat().st_mtime for f in phase_tifs) > min(
+        p.stat().st_mtime for _, p in mask_paths
+    ):
+        print(
+            f"  [warn] {xy_dir.name}: phase/ images are newer than masks/ — "
+            "masks may be out of date (re-run Omnipose?)"
+        )
+
     # Image shape from first frame only
     img_shape = _load_mask(mask_paths[0][1]).shape[:2]
 
@@ -709,6 +719,18 @@ def _track_position(
 
     buffers = _alloc_track_buffers(tracks, img_shape, pad)
     _fill_buffers(mask_paths, tracks, buffers, params)
+
+    # Remove previous track output (both modes) so stale cells don't survive
+    stale = [
+        f
+        for f in cell_dir.iterdir()
+        if re.fullmatch(r"[cC]ell\d{7}\.h5|cells\.h5", f.name)
+    ]
+    for f in stale:
+        f.unlink()
+    if stale:
+        print(f"  {xy_dir.name}: removed {len(stale)} previous cell file(s)")
+
     if consolidated:
         _flush_all_tracks_to_h5(cell_dir, tracks, buffers, params)
     else:
