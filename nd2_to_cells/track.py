@@ -249,8 +249,19 @@ def _merge_small_regions(
     if not merged:
         return labeled, regions
 
-    # Rebuild region list from updated labeled image
-    return labeled, _extract_regions(labeled, params)
+    # Rebuild region list from updated labeled image, keeping only regions that
+    # survived earlier filtering (filtered labels are still present in `labeled`)
+    kept = {r.label for r in regions} - merged
+    return labeled, [r for r in _extract_regions(labeled, params) if r.label in kept]
+
+
+def _load_clean_frame(
+    path: Path, params: TrackingParams
+) -> tuple[np.ndarray, list[Region]]:
+    """Load one mask and apply area filters + small-region merging."""
+    labeled = _load_mask(path)
+    regions = _apply_area_filters(_extract_regions(labeled, params), params)
+    return _merge_small_regions(labeled, regions, params)
 
 
 # ---------------------------------------------------------------------------
@@ -304,12 +315,7 @@ def link_frames_streaming(
 
     # Load first frame
     frame_0, path_0 = mask_paths[0]
-    labeled_prev = _load_mask(path_0)
-    regions_prev = _extract_regions(labeled_prev, params)
-    regions_prev = _apply_area_filters(regions_prev, params)
-    labeled_prev, regions_prev = _merge_small_regions(
-        labeled_prev, regions_prev, params
-    )
+    labeled_prev, regions_prev = _load_clean_frame(path_0, params)
 
     # Initialise tracks for first frame
     for r in regions_prev:
@@ -329,12 +335,7 @@ def link_frames_streaming(
         frame_cur, path_cur = mask_paths[fi]
         pass
 
-        labeled_cur = _load_mask(path_cur)
-        regions_cur = _extract_regions(labeled_cur, params)
-        regions_cur = _apply_area_filters(regions_cur, params)
-        labeled_cur, regions_cur = _merge_small_regions(
-            labeled_cur, regions_cur, params
-        )
+        labeled_cur, regions_cur = _load_clean_frame(path_cur, params)
 
         claimed: set[int] = set()
         new_active: dict[int, int] = {}
@@ -568,8 +569,12 @@ def _fill_buffers(
     mask_paths: list[tuple[int, Path]],
     tracks: dict[int, "Track"],
     buffers: dict[int, dict],
+    params: TrackingParams,
 ) -> None:
     """Single pass over mask PNGs: load each frame once, fill all active crops.
+
+    Each frame is cleaned exactly as during linking (area filters + merging),
+    so track labels refer to the same merged regions.
 
     Builds the frame -> [track_id] inverted index internally so the caller
     doesn't need to manage it.
@@ -587,7 +592,7 @@ def _fill_buffers(
         tids = frame_to_tids.get(abs_frame)
         if not tids:
             continue
-        labeled = _load_mask(path)
+        labeled, _ = _load_clean_frame(path, params)
         for tid in tids:
             track = tracks[tid]
             buf = buffers[tid]
@@ -703,7 +708,7 @@ def _track_position(
     print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 file(s)...")
 
     buffers = _alloc_track_buffers(tracks, img_shape, pad)
-    _fill_buffers(mask_paths, tracks, buffers)
+    _fill_buffers(mask_paths, tracks, buffers, params)
     if consolidated:
         _flush_all_tracks_to_h5(cell_dir, tracks, buffers, params)
     else:
