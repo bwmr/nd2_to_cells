@@ -141,6 +141,15 @@ are newer than the masks.
 | `--consolidated` | off | Write one `cells.h5` per position (one group per cell) instead of one file per cell. |
 | `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
 
+Division and linking checks are set in the preset (not SuperSegger parameters;
+both bundled presets use the defaults below):
+
+| Preset key | Default | Description |
+|------------|---------|-------------|
+| `min_division_age` | `8` | Minimum track age (frames) before a split counts as a division. Earlier splits are treated as segmentation flicker and the pieces are re-joined under the mother's identity. Tracks present in the first frame are exempt. Depends on the frame interval. |
+| `min_sister_ratio` | `0.5` | Minimum area ratio (smaller / larger) of the two pieces for a split to count as a division; unequal splits are re-joined. |
+| `confident_iou` | `0.3` | IoU at or above which a link is accepted regardless of `da_min` / `da_max`; the area-change limits then gate only low-overlap or centroid-fallback links. |
+
 ## HDF5 cell file layout
 
 In the default mode each `cell{ID:07d}.h5` contains the datasets below at the
@@ -174,6 +183,8 @@ Tracking parameters are stored in `presets/` as TOML files. Available presets:
 - `100XEc` — *E. coli*, 100x objective, 60 nm/px
 - `100XPa` — *P. aeruginosa*, 100x objective, 60 nm/px
 
-Parameters are derived from the corresponding SuperSegger `.mat` preset files.
+Parameters are derived from the corresponding SuperSegger `.mat` preset files,
+except `search_radius`, `min_division_age`, `min_sister_ratio` and
+`confident_iou`, which have no SuperSegger counterpart.
 Pass a preset name (`--preset 100XEc`, looked up in `presets/`) or a path to
 your own `.toml` (`--preset /path/to/custom.toml`).
