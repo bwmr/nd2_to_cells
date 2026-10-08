@@ -12,7 +12,7 @@ from .track import run_track
 def cli():
     """nd2_to_cells: ND2 microscopy files → per-cell HDF5 files.
 
-    Three sequential subcommands:
+    Subcommands (run in order; use assemble instead of align for Z-slice exports):
 
     \b
       export    — split ND2 into per-position TIFFs
@@ -50,7 +50,7 @@ def cli():
     "phase_channel",
     default=0,
     show_default=True,
-    type=int,
+    type=click.IntRange(min=0),
     help="0-based index of the phase-contrast channel in the ND2 file. "
     "All other channels become fluor1, fluor2, ... in order.",
 )
@@ -77,7 +77,7 @@ def export_cmd(
 
     Creates SuperSegger-like folder and exports frames to raw_im/ directory.
 
-    Files will be names {basename}_t{???}_xy{??}_c{?}.tif.
+    Files are named {basename}_t{T}xy{P}c{C}.tif.
     Also creates one xy{N}/ subdirectory per microscope position, each containing:
 
     \b
@@ -121,18 +121,27 @@ def export_cmd(
     default=50.0,
     show_default=True,
     type=float,
-    help="Shifts larger than this (pixels) are clamped to 0. "
-    "Guards against spurious large shifts from blurry or artifact frames.",
+    help="A frame whose shift differs from the previous accepted frame's by more "
+    "than this (pixels) is treated as an outlier and keeps that frame's shift, "
+    "unless the next frame confirms the jump. Guards against spurious shifts "
+    "from blurry or artifact frames.",
 )
 @click.option(
     "--align-to-first",
     "align_to_first",
     is_flag=True,
     default=False,
-    help="Register all frames against the first frame, instead of the default"
+    help="Register all frames against the first frame, instead of the default "
     "sequential mode.",
 )
-def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
+@click.option(
+    "--basename",
+    default=None,
+    type=str,
+    help="Filename prefix used during export (e.g. '260430'). "
+    "Optional if raw_im/ contains exactly one basename.",
+)
+def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first, basename):
     """Correct stage drift across frames for all xy positions.
 
     Output frames will be saved to channel-specific subfolders in the xy{N}/ directory.
@@ -143,6 +152,8 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
     Use align-to-first flag to align frames directly against frame 0. This avoids
     compounding of subpixel errors over long movies.
 
+    Existing phase/ and fluor*/ folders in each xy{N}/ are removed before
+    writing.
     """
     run_align(
         data_dir=data_dir,
@@ -150,6 +161,7 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
         workers=workers,
         max_shift_px=max_shift_px,
         align_to_first=align_to_first,
+        basename=basename,
     )
 
 
@@ -164,9 +176,10 @@ def align_cmd(data_dir, align_channel, workers, max_shift_px, align_to_first):
 )
 @click.option(
     "--basename",
-    required=True,
+    default=None,
     type=str,
-    help="Filename prefix used during export (e.g. '260430').",
+    help="Filename prefix used during export (e.g. '260430'). "
+    "Optional if raw_im/ contains Z-slice TIFFs of exactly one basename.",
 )
 @click.option(
     "--workers",
@@ -180,12 +193,15 @@ def assemble_cmd(data_dir, basename, workers):
 
     Reads per-slice TIFFs from raw_im/ (written by export --export-z-slices),
     groups them by position × timepoint × channel, and writes one ZYX TIFF
-    per group into xy{N}/{channel}/.
+    per group into xy{N}/{channel}/. Existing phase/ and fluor*/ folders in
+    each xy{N}/ are removed before writing.
 
     Use this instead of align when working with Z-stack data:
 
     \b
-      export --export-z-slices  →  assemble  →  track
+      export --export-z-slices  →  assemble
+
+    Segmentation and tracking of Z-stack data are not supported.
     """
     run_assemble(
         data_dir=data_dir,
@@ -241,6 +257,9 @@ def track_cmd(data_dir, preset, workers, pad, consolidated):
 
     With --consolidated, writes a single cells.h5 per position where each
     cell is stored as a group (e.g. cells.h5/Cell0000002/mask).
+
+    Previous cell*.h5 / Cell*.h5 / cells.h5 files in xy{N}/cell/ are removed
+    before writing. Warns if phase/ images are newer than the masks.
     """
     run_track(
         data_dir=data_dir,

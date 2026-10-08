@@ -4,10 +4,12 @@ Algorithm (per xy position):
     1. Enumerate mask file paths sorted by frame number (never load all at once).
     2. Stream frame pairs: load frame t and t+1, extract region properties,
        apply area filters and small-region merging, link, then discard t.
-    3. Write per-cell HDF5 files by re-reading only the frames each cell
-       was alive in (one frame at a time, never the full stack in memory).
+    3. Single pass over the masks, re-applying the same filtering and merging,
+       filling crop buffers for all tracks; then write HDF5 output.
 
-Memory design: at most 2 full labeled frames are held in RAM simultaneously.
+Memory design: linking holds at most 2 full labeled frames in RAM. Writing
+holds one frame plus crop buffers for all tracks until the end, so memory
+grows with movie length x cell count.
 Region objects store only scalars (label, area, centroid, bbox) — no arrays.
 IoU is computed on the fly from label equality within the bbox overlap region.
 
@@ -16,6 +18,7 @@ for division detection, area filtering, and HDF5 output.
 """
 
 import re
+import tomllib
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,12 +28,6 @@ import imageio.v3 as iio
 import numpy as np
 from skimage.measure import regionprops
 from tqdm import tqdm
-
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:
-    import tomli as tomllib  # fallback for 3.10
-
 
 # ---------------------------------------------------------------------------
 # Preset loading
@@ -156,9 +153,11 @@ def _iou_from_labeled(
     labeled_a: np.ndarray,
     label_a: int,
     bbox_a: tuple,
+    area_a: int,
     labeled_b: np.ndarray,
     label_b: int,
     bbox_b: tuple,
+    area_b: int,
 ) -> float:
     """Compute IoU using only the bbox overlap region — no full-frame arrays."""
     inter_bbox = _bbox_intersect(bbox_a, bbox_b)
@@ -171,16 +170,6 @@ def _iou_from_labeled(
     if inter == 0:
         return 0.0
     # Union = area_a + area_b - inter  (faster than materialising full union)
-    area_a = int(
-        np.count_nonzero(
-            labeled_a[bbox_a[0] : bbox_a[2], bbox_a[1] : bbox_a[3]] == label_a
-        )
-    )
-    area_b = int(
-        np.count_nonzero(
-            labeled_b[bbox_b[0] : bbox_b[2], bbox_b[1] : bbox_b[3]] == label_b
-        )
-    )
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
 
@@ -256,8 +245,19 @@ def _merge_small_regions(
     if not merged:
         return labeled, regions
 
-    # Rebuild region list from updated labeled image
-    return labeled, _extract_regions(labeled, params)
+    # Rebuild region list from updated labeled image, keeping only regions that
+    # survived earlier filtering (filtered labels are still present in `labeled`)
+    kept = {r.label for r in regions} - merged
+    return labeled, [r for r in _extract_regions(labeled, params) if r.label in kept]
+
+
+def _load_clean_frame(
+    path: Path, params: TrackingParams, merges: dict[int, int]
+) -> tuple[np.ndarray, list[Region]]:
+    """Load one mask and apply area filters + small-region merging."""
+    labeled = _load_mask(path)
+    regions = _apply_area_filters(_extract_regions(labeled, params), params)
+    return _merge_small_regions(labeled, regions, params, merges)
 
 
 # ---------------------------------------------------------------------------
@@ -329,11 +329,8 @@ def link_frames_streaming(
 
     # Load first frame
     frame_0, path_0 = mask_paths[0]
-    labeled_prev = _load_mask(path_0)
-    regions_prev = _extract_regions(labeled_prev, params)
-    regions_prev = _apply_area_filters(regions_prev, params)
-    labeled_prev, regions_prev = _merge_small_regions(
-        labeled_prev, regions_prev, params, merges.setdefault(frame_0, {})
+    labeled_prev, regions_prev = _load_clean_frame(
+        path_0, params, merges.setdefault(frame_0, {})
     )
 
     # Initialise tracks for first frame
@@ -352,15 +349,8 @@ def link_frames_streaming(
 
     for fi in range(1, n_frames):
         frame_cur, path_cur = mask_paths[fi]
-        pass
-
-        labeled_cur = _load_mask(path_cur)
-        regions_cur = _extract_regions(labeled_cur, params)
-        regions_cur = _apply_area_filters(regions_cur, params)
         frame_merges = merges.setdefault(frame_cur, {})
-        labeled_cur, regions_cur = _merge_small_regions(
-            labeled_cur, regions_cur, params, frame_merges
-        )
+        labeled_cur, regions_cur = _load_clean_frame(path_cur, params, frame_merges)
 
         claimed: set[int] = set()
         new_active: dict[int, int] = {}
@@ -398,9 +388,11 @@ def link_frames_streaming(
                         labeled_prev,
                         r0.label,
                         r0.bbox,
+                        r0.area,
                         labeled_cur,
                         r1.label,
                         r1.bbox,
+                        r1.area,
                     )
                     if iou >= params.overlap_limit_min:
                         candidates_iou.append((iou, r1))
@@ -657,6 +649,15 @@ def _fill_buffers(
         del labeled
 
 
+def _is_complete(track: "Track", params: TrackingParams) -> bool:
+    """Complete cell cycle: born from an observed division, divides, long enough."""
+    return (
+        track.mother_id != 0
+        and track.divide
+        and len(track.frames) >= params.min_cell_age
+    )
+
+
 def _flush_all_tracks_to_h5(
     cell_dir: Path,
     tracks: dict[int, "Track"],
@@ -669,9 +670,7 @@ def _flush_all_tracks_to_h5(
             if track.track_id not in buffers:
                 continue
             buf = buffers[track.track_id]
-            n_frames = len(track.frames)
-            is_complete = track.divide and n_frames >= params.min_cell_age
-            prefix = "Cell" if is_complete else "cell"
+            prefix = "Cell" if _is_complete(track, params) else "cell"
             grp = h5.require_group(f"{prefix}{track.track_id:07d}")
             grp.create_dataset("birth", data=np.int64(track.frames[0] + 1))
             grp.create_dataset("death", data=np.int64(track.frames[-1] + 1))
@@ -697,9 +696,7 @@ def _flush_track_to_h5(
     params: TrackingParams,
 ) -> None:
     """Write one HDF5 file from a pre-filled buffer dict."""
-    n_frames = len(track.frames)
-    is_complete = track.divide and n_frames >= params.min_cell_age
-    prefix = "Cell" if is_complete else "cell"
+    prefix = "Cell" if _is_complete(track, params) else "cell"
     fname = f"{prefix}{track.track_id:07d}.h5"
 
     with h5py.File(cell_dir / fname, "w") as h5:
@@ -754,6 +751,26 @@ def _track_position(
         print(f"  [skip] {xy_dir.name}: empty masks/ directory")
         return
 
+    # Missing frames are bridged by the linker; warn since links are less reliable
+    frames = {f for f, _ in mask_paths}
+    missing = [f + 1 for f in range(min(frames), max(frames)) if f not in frames]
+    if missing:
+        shown = ", ".join(map(str, missing[:10])) + (" …" if len(missing) > 10 else "")
+        print(
+            f"  [warn] {xy_dir.name}: {len(missing)} frame(s) missing from masks/ "
+            f"(t = {shown}); tracks are linked across the gap(s)"
+        )
+
+    # Masks are kept across re-alignment; warn if images were rewritten since
+    phase_tifs = list((xy_dir / "phase").glob("*.tif"))
+    if phase_tifs and max(f.stat().st_mtime for f in phase_tifs) > min(
+        p.stat().st_mtime for _, p in mask_paths
+    ):
+        print(
+            f"  [warn] {xy_dir.name}: phase/ images are newer than masks/ — "
+            "masks may be out of date (re-run Omnipose?)"
+        )
+
     # Image shape from first frame only
     img_shape = _load_mask(mask_paths[0][1]).shape[:2]
 
@@ -763,6 +780,18 @@ def _track_position(
 
     buffers = _alloc_track_buffers(tracks, img_shape, pad)
     _fill_buffers(mask_paths, tracks, buffers, merges)
+
+    # Remove previous track output (both modes) so stale cells don't survive
+    stale = [
+        f
+        for f in cell_dir.iterdir()
+        if re.fullmatch(r"[cC]ell\d{7}\.h5|cells\.h5", f.name)
+    ]
+    for f in stale:
+        f.unlink()
+    if stale:
+        print(f"  {xy_dir.name}: removed {len(stale)} previous cell file(s)")
+
     if consolidated:
         _flush_all_tracks_to_h5(cell_dir, tracks, buffers, params)
     else:
@@ -771,7 +800,8 @@ def _track_position(
                 _flush_track_to_h5(cell_dir, track, buffers[track.track_id], params)
 
 
-def _track_position_wrapper(args):
+def _track_position_wrapper(args) -> str | None:
+    """Run one position; return an error message instead of raising."""
     xy_dir, preset_str, pad, consolidated = args
     try:
         params = load_preset(preset_str)
@@ -781,6 +811,8 @@ def _track_position_wrapper(args):
 
         print(f"ERROR tracking {xy_dir}: {exc}")
         traceback.print_exc()
+        return f"{Path(xy_dir).name}: {exc}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -812,8 +844,7 @@ def run_track(
     )
 
     if not xy_dirs:
-        print(f"No xy*/ directories found in {data_dir}")
-        return
+        raise FileNotFoundError(f"No xy*/ directories found in {data_dir}")
 
     params = load_preset(preset)
     print(
@@ -823,10 +854,10 @@ def run_track(
         f"remove_stray={params.remove_stray})"
     )
 
+    args = [(str(d), preset, pad, consolidated) for d in xy_dirs]
     if workers > 1:
-        args = [(str(d), preset, pad, consolidated) for d in xy_dirs]
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            list(
+            errors = list(
                 tqdm(
                     pool.map(_track_position_wrapper, args),
                     total=len(args),
@@ -835,7 +866,12 @@ def run_track(
                 )
             )
     else:
-        for xy_dir in xy_dirs:
-            _track_position(xy_dir, params, pad, consolidated)
+        errors = [_track_position_wrapper(a) for a in args]
 
+    failed = [e for e in errors if e]
+    if failed:
+        raise RuntimeError(
+            f"Tracking failed for {len(failed)}/{len(args)} position(s):\n  "
+            + "\n  ".join(failed)
+        )
     print("Tracking complete.")

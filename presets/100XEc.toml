@@ -28,11 +28,13 @@ da_min = -0.2
 # Equivalent to SuperSegger MIN_AREA.
 min_area = 8
 
-# Discard isolated regions (no pixel-adjacent neighbours) below this area.
+# Discard isolated regions below this area. A region counts as isolated if no
+# other region's bounding box lies within 1 px of its bounding box.
 # Equivalent to SuperSegger MIN_AREA_NO_NEIGH.
 min_area_no_neigh = 30
 
 # Try merging adjacent regions both below this area into a single region.
+# Adjacent = bounding boxes within 1 px of each other.
 # Equivalent to SuperSegger SMALL_AREA_MERGE.
 small_area_merge = 50
 
@@ -45,8 +47,9 @@ remove_stray = true
 # Equivalent to SuperSegger MIN_CELL_AGE.
 min_cell_age = 5
 
-# Maximum centroid distance (pixels) for the fallback linker used when IoU = 0.
-# Handles daughters that don't overlap with the mother mask after division.
+# Maximum centroid distance (pixels) for the fallback linker. Used only when a
+# cell has no candidate with IoU >= overlap_limit_min; it cannot recover a
+# second daughter if the first one overlaps the mother.
 # Not present in SuperSegger; set conservatively.
 search_radius = 15
 

@@ -11,6 +11,7 @@ nd2_to_cells/      # Python package
   cli.py           # Click entrypoint — thin wrappers only
   export.py        # run_export(): ND2 → per-position TIFFs
   align.py         # run_align(): phase-cross-correlation drift correction
+  assemble.py      # run_assemble(): Z-slice TIFFs → per-timepoint ZYX stacks (alternative to align)
   track.py         # run_track(): IoU linker → cell*.h5 files
 presets/
   100XEc.toml      # E. coli defaults (default preset)
@@ -44,11 +45,14 @@ nd2_to_cells align  --data /data/exp/ --workers 4
 nd2_to_cells track  --data /data/exp/ --preset 100XEc --workers 4
 ```
 
+Z-stack data: `export --export-z-slices` → `assemble` (instead of `align`). No segmentation or tracking for Z-stack (3D+T) data.
+`--basename` is optional for `align` and `assemble` when `raw_im/` holds a single export.
+
 ## Output layout
 
 ```
 /data/exp/
-  raw_im/        pre-alignment TIFF copies (written by export)
+  raw_im/        exported TIFFs (written by export; input to align/assemble)
   xy01/
     phase/       aligned phase TIFFs
     fluor1/      aligned fluor channel 1
@@ -59,12 +63,13 @@ nd2_to_cells track  --data /data/exp/ --preset 100XEc --workers 4
 
 ## Architecture notes
 
-- **Memory design**: `align.py` and `track.py` hold at most 2 frames in RAM at a time. Do not load full stacks.
+- **Memory design**: `align.py` holds at most 2 frames; `assemble.py` holds one timepoint's Z-stack. `track.py` holds 2 frames while linking, but the writing step keeps crop buffers for all tracks until the end, so memory grows with movie length × cell count. Do not load full stacks.
 - **`track.py` Region dataclass**: stores only scalars (label, area, centroid, bbox) — never mask arrays. IoU computed on-the-fly over bbox overlap only.
-- **Parallelism**: `ProcessPoolExecutor` per xy position. Worker entry points are module-level picklable wrappers (`_align_position_wrapper`, `_track_position_wrapper`).
+- **Parallelism**: `ProcessPoolExecutor` per xy position. Worker entry points are module-level picklable wrappers (`_align_position_wrapper`, `_assemble_position_wrapper`, `_track_position_wrapper`).
 - **Preset resolution**: `load_preset()` first tries the argument as a path; if not found, looks in `presets/{name}.toml`. Custom presets can be passed as a file path.
 - **Cell naming**: `cell{ID:07d}.h5` (lowercase) = partial observation; `Cell{ID:07d}.h5` (uppercase) = complete cell cycle (birth + division observed, length ≥ `min_cell_age`).
-- **Filename convention**: TIFFs are `{basename}_t{T}xy{P}c{C}.tif`; masks follow Omnipose pattern `*cp_masks.png`.
+- **Filename convention**: TIFFs are `{basename}_t{T}xy{P}c{C}.tif`; Z-slice TIFFs (written by `export --export-z-slices`, read by `assemble`) are `{basename}_t{T}xy{P}z{Z}c{C}.tif`; masks follow Omnipose pattern `*cp_masks.png`.
+- **Output replacement**: `align`/`assemble` replace `xy*/phase/` and `xy*/fluor*/`; `track` replaces its own `*.h5` output in `cell/`; `masks/` is never modified.
 
 ## Behavioral guidelines
 
