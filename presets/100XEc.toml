@@ -52,3 +52,21 @@ min_cell_age = 5
 # second daughter if the first one overlaps the mother.
 # Not present in SuperSegger; set conservatively.
 search_radius = 15
+
+# Minimum age (frames) a track must reach before a split is accepted as a
+# division; earlier splits are treated as segmentation flicker and the pieces
+# are re-joined under the mother's identity. Tracks present in the first frame
+# are exempt (their birth was not observed). Depends on frame interval:
+# 8 frames suits ~1 min/frame with a 20-30 min doubling time.
+# Not present in SuperSegger.
+min_division_age = 8
+
+# Minimum area ratio (smaller / larger) between the two pieces for a split to
+# be accepted as a division; unequal splits are re-joined like young ones.
+# Not present in SuperSegger.
+min_sister_ratio = 0.5
+
+# IoU at or above which a link is accepted regardless of da_min / da_max.
+# The da limits then only gate ambiguous (low-overlap or centroid) links.
+# Not present in SuperSegger.
+confident_iou = 0.3
