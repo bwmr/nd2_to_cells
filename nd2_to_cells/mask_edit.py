@@ -10,6 +10,7 @@ import numpy as np
 from scipy import ndimage
 
 from nd2_to_cells.assign import label_colmajor
+from nd2_to_cells.imreg import register_masks
 
 _SQUARE3 = np.ones((3, 3), dtype=bool)
 
@@ -89,106 +90,24 @@ def missing_seg_2to1(frame_c, reg_c, frame_r, regs_r, frame_f, regs_f) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# registerMasks_monointensity (imregtform 'monomodal', affine) via SimpleITK
-# ---------------------------------------------------------------------------
-
-GAUSS_SIGMA = 1.013889
-PYRAMID_SHRINK = (4, 2, 1)
-PYRAMID_SIGMA = (2.0, 1.0, 0.0)
-REG_MARGIN = 64  # px around both masks for registration
 MASK_MARGIN = 16  # px around the region and registered cells for the watershed
-
-
-def imgaussfilt(img: np.ndarray, sigma: float) -> np.ndarray:
-    """imgaussfilt: kernel size 2*ceil(2*sigma)+1, replicate padding."""
-    half = int(np.ceil(2 * sigma))
-    x = np.arange(-half, half + 1, dtype=np.float64)
-    k = np.exp(-(x**2) / (2 * sigma**2))
-    k /= k.sum()
-    out = ndimage.correlate1d(img, k, axis=0, mode="nearest")
-    return ndimage.correlate1d(out, k, axis=1, mode="nearest")
-
-
-def _window(support: np.ndarray, margin: int, align: int = 1) -> tuple[slice, slice]:
-    """Bounding box of ``support`` plus ``margin``, edges on multiples of align."""
-    h, w = support.shape
-    if not support.any():
-        return slice(0, h), slice(0, w)
-    ys, xs = ndimage.find_objects(support.astype(np.int8))[0]
-    y0 = max(ys.start - margin, 0) // align * align
-    x0 = max(xs.start - margin, 0) // align * align
-    y1 = min(-(-(ys.stop + margin) // align) * align, h)
-    x1 = min(-(-(xs.stop + margin) // align) * align, w)
-    return slice(y0, y1), slice(x0, x1)
-
-
-def register_masks(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
-    """registerMasks_monointensity: affine-register ``moving`` onto ``fixed``.
-
-    Returns the moving image, normalised to [0, 1], warped into the fixed
-    frame with nearest-neighbour interpolation. Runs on a window around both
-    masks (see _register); outside it the result is 0.
-    """
-    window = _window((moving != 0) | (fixed != 0), REG_MARGIN, align=4)
-    return _register(moving, fixed, window)
-
-
-def _register(moving: np.ndarray, fixed: np.ndarray, window) -> np.ndarray:
-    """Registration on ``window`` that behaves like MATLAB's full-frame call.
-
-    MATLAB registers the whole frame. On a window that keeps full-frame world
-    coordinates and optimizer scales, starts on a multiple of the coarsest
-    shrink factor and holds all non-zero pixels plus a margin, the optimizer
-    takes the same steps: its step direction is normalised, and the gradient
-    tolerance is rescaled because MeanSquares averages over all pixels.
-    """
-    import SimpleITK as sitk
-
-    moving = moving.astype(np.float64)
-    lo, hi = moving.min(), moving.max()
-    moving = np.zeros_like(moving) if lo == hi else (moving - lo) / (hi - lo)
-    h, w = fixed.shape
-    max_translation = np.hypot(min(w, h), max(w, h))
-    ys, xs = window
-    n_crop = (ys.stop - ys.start) * (xs.stop - xs.start)
-
-    def to_sitk(a):
-        im = sitk.GetImageFromArray(np.ascontiguousarray(a, dtype=np.float64))
-        # MATLAB world coordinates: pixel (1, 1) of the full frame is at (1, 1).
-        im.SetOrigin((xs.start + 1.0, ys.start + 1.0))
-        return im
-
-    fixed_im = to_sitk(imgaussfilt(fixed[ys, xs].astype(np.float64), GAUSS_SIGMA))
-    moving_im = to_sitk(imgaussfilt(moving[ys, xs], GAUSS_SIGMA))
-    reg = sitk.ImageRegistrationMethod()
-    reg.SetMetricAsMeanSquares()
-    reg.SetMetricSamplingStrategy(reg.NONE)
-    reg.SetInterpolator(sitk.sitkLinear)
-    reg.SetOptimizerAsRegularStepGradientDescent(
-        learningRate=6.25e-02,
-        minStep=1e-05,
-        numberOfIterations=100,
-        relaxationFactor=0.5,
-        gradientMagnitudeTolerance=1e-04 * (h * w) / n_crop,
-        estimateLearningRate=reg.Never,
-    )
-    reg.SetOptimizerScales([1, 1, 1, 1, 1 / max_translation, 1 / max_translation])
-    reg.SetShrinkFactorsPerLevel(list(PYRAMID_SHRINK))
-    reg.SetSmoothingSigmasPerLevel(list(PYRAMID_SIGMA))
-    reg.SetInitialTransform(sitk.AffineTransform(2), inPlace=False)
-    tform = reg.Execute(fixed_im, moving_im)
-    warped = sitk.Resample(
-        to_sitk(moving[ys, xs]), fixed_im, tform, sitk.sitkNearestNeighbor, 0.0
-    )
-    out = np.zeros_like(moving)
-    out[ys, xs] = sitk.GetArrayFromImage(warped)
-    return out
 
 
 # ---------------------------------------------------------------------------
 # createMask: watershed of the registered cells, with MATLAB's morphology
 # ---------------------------------------------------------------------------
+
+
+def _window(support: np.ndarray, margin: int) -> tuple[slice, slice]:
+    """Bounding box of ``support`` plus ``margin``, clipped to the image."""
+    h, w = support.shape
+    if not support.any():
+        return slice(0, h), slice(0, w)
+    ys, xs = ndimage.find_objects(support.astype(np.int8))[0]
+    return (
+        slice(max(ys.start - margin, 0), min(ys.stop + margin, h)),
+        slice(max(xs.start - margin, 0), min(xs.stop + margin, w)),
+    )
 
 
 def _create_mask(mask_c, registered, num1, num2) -> np.ndarray:
@@ -268,7 +187,11 @@ def _regional_min(img: np.ndarray) -> np.ndarray:
     """
     from skimage.morphology import local_maxima
 
-    return local_maxima(np.float32(1) - img, connectivity=2, allow_borders=True)
+    comp = np.float32(1) - img
+    if comp.min() == comp.max():
+        # MATLAB: a constant image is one regional extremum; skimage finds none.
+        return np.ones(img.shape, dtype=bool)
+    return local_maxima(comp, connectivity=2, allow_borders=True)
 
 
 def _imimposemin(img: np.ndarray, bw: np.ndarray) -> np.ndarray:
@@ -281,6 +204,36 @@ def _imimposemin(img: np.ndarray, bw: np.ndarray) -> np.ndarray:
     return np.float32(1) - rec
 
 
+PLATEAU_FAST = 100_000  # px of background plateau above which it is filled directly
+
+
+def _watershed(img: np.ndarray, markers: np.ndarray) -> np.ndarray:
+    """MATLAB watershed (8-connected, ridge pixels 0) via scikit-image.
+
+    scikit-image's ridge-line mode is very slow on large plateaus, which occur
+    when the region is a label shared by distant blobs. Then only the cells
+    and a 2-pixel ring of the background plateau are flooded; the rest of the
+    plateau takes the label of the nearest labelled pixel (chessboard
+    distance). That is what flooding a plateau does, except for where ridge
+    pixels end up.
+    """
+    from skimage.segmentation import watershed
+
+    plateau = (img == img.max()) & (markers == 0)
+    if np.count_nonzero(plateau) < PLATEAU_FAST:
+        return watershed(img, markers=markers, connectivity=2, watershed_line=True)
+    core = ndimage.binary_dilation(~plateau, structure=np.ones((3, 3)), iterations=2)
+    rl = watershed(img, markers=markers, connectivity=2, watershed_line=True, mask=core)
+    seeds = rl > 0
+    if seeds.any() and not core.all():
+        iy, ix = ndimage.distance_transform_cdt(
+            ~seeds, metric="chessboard", return_distances=False, return_indices=True
+        )
+        far = ~core
+        rl[far] = rl[iy[far], ix[far]]
+    return rl
+
+
 def _watershedpaw(img: np.ndarray, roi: np.ndarray) -> np.ndarray:
     """watershedpaw: watershed, then give each ridge pixel a neighbour's label.
 
@@ -289,10 +242,8 @@ def _watershedpaw(img: np.ndarray, roi: np.ndarray) -> np.ndarray:
     full-frame loop there. Basins are numbered in column-major order of the
     regional minima, as MATLAB's watershed does.
     """
-    from skimage.segmentation import watershed
-
     minima, _ = label_colmajor(_regional_min(img))
-    rl = watershed(img, markers=minima, connectivity=2, watershed_line=True)
+    rl = _watershed(img, minima)
     out = rl.copy()
     h, w = img.shape
     rows, cols = np.nonzero((rl == 0) & roi)

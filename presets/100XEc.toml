@@ -1,72 +1,24 @@
 # Tracking parameters for E. coli at 100x (60 nm/px).
-# Derived from SuperSegger preset 100XEc.mat.
-#
-# Parameters carried over from SuperSegger trackOpti struct:
-#   OVERLAP_LIMIT_MIN = 0.08  -> overlap_limit_min
-#   DA_MAX            = 0.3   -> da_max
-#   DA_MIN            = -0.2  -> da_min
-#   MIN_AREA          = 8     -> min_area
-#   MIN_AREA_NO_NEIGH = 30    -> min_area_no_neigh
-#   SMALL_AREA_MERGE  = 50    -> small_area_merge
-#   REMOVE_STRAY      = 1     -> remove_stray
-#   MIN_CELL_AGE      = 5     -> min_cell_age
+# Effective SuperSegger CONST.trackOpti values of a superSeggerGui run with the
+# 100XEc preset (settings/100XEc.mat + loadConstants.m + GUI defaults).
 
 [tracking]
-# Minimum IoU (mask overlap / mask union) to consider two regions linked.
-# Equivalent to SuperSegger OVERLAP_LIMIT_MIN.
-overlap_limit_min = 0.08
-
-# Maximum normalised area change between frames: (area_t1 - area_t) / area_t1.
-# Positive = growth. Equivalent to SuperSegger DA_MAX.
+# Area-change limits (DA_MIN / DA_MAX). Normalised area change outside
+# [da_min, da_max] flags a linking error (ehist), and the division and merge
+# tests in errorRez require the change to lie inside.
 da_max = 0.3
-
-# Minimum normalised area change. Negative = shrinkage allowed.
-# Equivalent to SuperSegger DA_MIN.
 da_min = -0.2
 
-# Discard regions with area below this threshold (pixels).
-# Equivalent to SuperSegger MIN_AREA.
-min_area = 8
-
-# Discard isolated regions below this area. A region counts as isolated if no
-# other region's bounding box lies within 1 px of its bounding box.
-# Equivalent to SuperSegger MIN_AREA_NO_NEIGH.
-min_area_no_neigh = 30
-
-# Try merging adjacent regions both below this area into a single region.
-# Adjacent = bounding boxes within 1 px of each other.
-# Equivalent to SuperSegger SMALL_AREA_MERGE.
+# Two regions that map back to the same cell are merged if either is smaller
+# than this (pixels), among other conditions (SMALL_AREA_MERGE).
 small_area_merge = 50
 
-# If true, delete regions that appear with no predecessor and also disappear
-# with no successor (stray detections). Equivalent to SuperSegger REMOVE_STRAY.
-remove_stray = true
+# Delete regions with no backward and no forward map (REMOVE_STRAY). Off in
+# SuperSegger: loadConstants does not copy it from the preset, and the GUI
+# checkbox defaults to off.
+remove_stray = false
 
-# Minimum track length (frames) for a cell cycle to be considered complete.
-# Controls Cell vs cell filename capitalisation.
-# Equivalent to SuperSegger MIN_CELL_AGE.
-min_cell_age = 5
-
-# Maximum centroid distance (pixels) for the fallback linker. Used only when a
-# cell has no candidate with IoU >= overlap_limit_min; it cannot recover a
-# second daughter if the first one overlaps the mother.
-# Not present in SuperSegger; set conservatively.
-search_radius = 15
-
-# Minimum age (frames) a track must reach before a split is accepted as a
-# division; earlier splits are treated as segmentation flicker and the pieces
-# are re-joined under the mother's identity. Tracks present in the first frame
-# are exempt (their birth was not observed). Depends on frame interval:
-# 8 frames suits ~1 min/frame with a 20-30 min doubling time.
-# Not present in SuperSegger.
-min_division_age = 8
-
-# Minimum area ratio (smaller / larger) between the two pieces for a split to
-# be accepted as a division; unequal splits are re-joined like young ones.
-# Not present in SuperSegger.
-min_sister_ratio = 0.5
-
-# IoU at or above which a link is accepted regardless of da_min / da_max.
-# The da limits then only gate ambiguous (low-overlap or centroid) links.
-# Not present in SuperSegger.
-confident_iou = 0.3
+# A complete cell cycle (Cell{ID}.h5) divides at least this many frames after
+# its birth, i.e. spans min_cell_age + 1 frames or more (MIN_CELL_AGE;
+# superSeggerGui default 3).
+min_cell_age = 3

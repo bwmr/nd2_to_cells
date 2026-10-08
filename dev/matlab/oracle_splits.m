@@ -18,7 +18,7 @@ if nargin > 2
 end
 fprintf('numthreads = %d\n', feature('numthreads'));
 files = dir(fullfile(dumpdir, 'split_*.mat'));
-files = files(~contains({files.name}, '_ml'));
+files = files(~cellfun(@isempty, regexp({files.name}, '^split_t\d{3}_\d{3}\.mat$')));
 for i = 1:numel(files)
     d = load(fullfile(dumpdir, files(i).name));
     data_c = struct();

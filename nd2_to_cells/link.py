@@ -122,6 +122,7 @@ def link_frames(
     n_frames: int,
     params,
     warn: Callable[[str], None] = print,
+    progress: Callable[[int], None] | None = None,
 ) -> list[Frame]:
     """Link all frames of a position; return one Frame per file (1-based t-1).
 
@@ -144,6 +145,8 @@ def link_frames(
         if data_r is not None:
             data_r.release_labels()
         data_r = data_c
+        if progress is not None:
+            progress(t)
     if data_r is not None:
         data_r.release_labels()
     return states

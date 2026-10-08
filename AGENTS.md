@@ -12,13 +12,18 @@ nd2_to_cells/      # Python package
   export.py        # run_export(): ND2 → per-position TIFFs
   align.py         # run_align(): phase-cross-correlation drift correction
   assemble.py      # run_assemble(): Z-slice TIFFs → per-timepoint ZYX stacks (alternative to align)
-  track.py         # run_track(): IoU linker → cell*.h5 files
+  track.py         # run_track(): SuperSegger linking port → cell*.h5 files
+  link.py          #   driver, errorRez, cell marker (trackOptiLinkCellMulti etc.)
+  assign.py        #   frame-to-frame assignment (multiAssignmentSparse)
+  mask_edit.py     #   merges and splits (merge2Regions, missingSeg2to1)
+  imreg.py         #   affine mask registration (MATLAB imregtform / ITK v3 path)
+dev/               # parity scripts against SuperSegger output (not packaged)
 presets/
   100XEc.toml      # E. coli defaults (default preset)
   100XPa.toml      # P. aeruginosa defaults
 ```
 
-No tests directory. No CI. No Makefile.
+No tests directory. No CI. No Makefile. `dev/` holds parity scripts that compare `track` with SuperSegger output (see `docs/supersegger_port.md`).
 
 ## Install
 
@@ -63,11 +68,11 @@ Z-stack data: `export --export-z-slices` → `assemble` (instead of `align`). No
 
 ## Architecture notes
 
-- **Memory design**: `align.py` holds at most 2 frames; `assemble.py` holds one timepoint's Z-stack. `track.py` holds 2 frames while linking, but the writing step keeps crop buffers for all tracks until the end, so memory grows with movie length × cell count. Do not load full stacks.
-- **`track.py` Region dataclass**: stores only scalars (label, area, centroid, bbox) — never mask arrays. IoU computed on-the-fly over bbox overlap only.
+- **Memory design**: `align.py` holds at most 2 frames; `assemble.py` holds one timepoint's Z-stack. `track.py` holds 3 label frames (previous, current, next) while linking, plus scalar region tables for all frames and compressed copies of edited masks; the writing step keeps crop buffers for all tracks until the end, so memory grows with movie length × cell count. Do not load full stacks.
+- **Linking port**: `link.py`/`assign.py`/`mask_edit.py`/`imreg.py` reproduce SuperSegger bug-for-bug (MATLAB quirks are kept and marked "MATLAB quirk"). Labels are 1-based: per-region arrays have an unused index 0. Check changes with the `dev/` parity scripts.
 - **Parallelism**: `ProcessPoolExecutor` per xy position. Worker entry points are module-level picklable wrappers (`_align_position_wrapper`, `_assemble_position_wrapper`, `_track_position_wrapper`).
 - **Preset resolution**: `load_preset()` first tries the argument as a path; if not found, looks in `presets/{name}.toml`. Custom presets can be passed as a file path.
-- **Cell naming**: `cell{ID:07d}.h5` (lowercase) = partial observation; `Cell{ID:07d}.h5` (uppercase) = complete cell cycle (birth + division observed, length ≥ `min_cell_age`).
+- **Cell naming**: `cell{ID:07d}.h5` (lowercase) = partial observation; `Cell{ID:07d}.h5` (uppercase) = complete cell cycle (SuperSegger stat0 = 2: born from a division, divides, no linking error, divides ≥ `min_cell_age` frames after birth).
 - **Filename convention**: TIFFs are `{basename}_t{T}xy{P}c{C}.tif`; Z-slice TIFFs (written by `export --export-z-slices`, read by `assemble`) are `{basename}_t{T}xy{P}z{Z}c{C}.tif`; masks follow Omnipose pattern `*cp_masks.png`.
 - **Output replacement**: `align`/`assemble` replace `xy*/phase/` and `xy*/fluor*/`; `track` replaces its own `*.h5` output in `cell/`; `masks/` is never modified.
 

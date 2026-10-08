@@ -1,5 +1,9 @@
 # Lineage linking: `nd2_to_cells track` vs OmniSegger
 
+> On this branch `track.py` is the SuperSegger port described in
+> [`supersegger_port.md`](supersegger_port.md); this document compares the
+> IoU linker it replaced (`main` at `1a7eb27`).
+
 This compares how `nd2_to_cells/track.py` turns Omnipose masks into cell
 lineages with what OmniSegger does on the same input. The OmniSegger side is
 described in [`supersegger_linking_reference.md`](supersegger_linking_reference.md)

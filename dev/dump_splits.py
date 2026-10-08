@@ -30,6 +30,9 @@ def main():
     ap.add_argument("out_dir", type=Path)
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--stop", type=int, default=None)
+    ap.add_argument(
+        "--keep-going", action="store_true", help="treat a raising split as failed"
+    )
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     xy = args.xy_dir
@@ -39,28 +42,31 @@ def main():
     state = {"t": 0, "n": 0}
 
     def wrapped(frame_c, reg_c, frame_r, regs_r, frame_f, regs_f):
-        before = frame_c.labels.copy()
-        ok = missing_seg_2to1(frame_c, reg_c, frame_r, regs_r, frame_f, regs_f)
         state["n"] += 1
-        sio.savemat(
-            args.out_dir / f"split_t{state['t']:03d}_{state['n']:03d}.mat",
-            {
-                "rl": before.astype(np.uint16),
-                "rlr": frame_r.labels.astype(np.uint16),
-                "rlf": (
-                    frame_f.labels.astype(np.uint16)
-                    if frame_f is not None
-                    else np.zeros((0, 0), np.uint16)
-                ),
-                "regC": float(reg_c),
-                "regR": np.array(regs_r, dtype=float),
-                "regF": np.array(regs_f, dtype=float),
-                "num_regs": float(frame_c.num_regs),
-                "py_rl": frame_c.labels.astype(np.uint16),
-                "py_success": float(ok),
-            },
-            do_compression=True,
-        )
+        out = args.out_dir / f"split_t{state['t']:03d}_{state['n']:03d}.mat"
+        data = {
+            "rl": frame_c.labels.astype(np.uint16),
+            "rlr": frame_r.labels.astype(np.uint16),
+            "rlf": (
+                frame_f.labels.astype(np.uint16)
+                if frame_f is not None
+                else np.zeros((0, 0), np.uint16)
+            ),
+            "regC": float(reg_c),
+            "regR": np.array(regs_r, dtype=float),
+            "regF": np.array(regs_f, dtype=float),
+            "num_regs": float(frame_c.num_regs),
+        }
+        sio.savemat(out, data, do_compression=True)  # before the call, so crashes are kept
+        try:
+            ok = missing_seg_2to1(frame_c, reg_c, frame_r, regs_r, frame_f, regs_f)
+        except RuntimeError as exc:
+            print(f"t={state['t']}: split call {state['n']} raised: {exc}", flush=True)
+            if not args.keep_going:
+                raise
+            ok = False
+        data.update(py_rl=frame_c.labels.astype(np.uint16), py_success=float(ok))
+        sio.savemat(out, data, do_compression=True)
         return ok
 
     link.missing_seg_2to1 = wrapped
