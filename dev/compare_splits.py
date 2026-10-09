@@ -24,7 +24,9 @@ from nd2_to_cells.mask_edit import missing_seg_2to1  # noqa: E402
 
 
 def python_split(d):
-    frame_c = SimpleNamespace(labels=d["rl"].astype(np.int32), num_regs=int(d["num_regs"]))
+    frame_c = SimpleNamespace(
+        labels=d["rl"].astype(np.int32), num_regs=int(d["num_regs"])
+    )
     frame_r = SimpleNamespace(labels=d["rlr"].astype(np.int32))
     rlf = d["rlf"]
     frame_f = SimpleNamespace(labels=rlf.astype(np.int32)) if rlf.size else None
@@ -36,7 +38,11 @@ def python_split(d):
 
 def main():
     dump = Path(sys.argv[1])
-    cases = sorted(p for p in dump.glob("split_*.mat") if re.fullmatch(r"split_t\d{3}_\d{3}\.mat", p.name))
+    cases = sorted(
+        p
+        for p in dump.glob("split_*.mat")
+        if re.fullmatch(r"split_t\d{3}_\d{3}\.mat", p.name)
+    )
     tally: dict[str, Counter] = {"py vs ml1": Counter(), "ml10 vs ml1": Counter()}
     rows = []
     for case in cases:
@@ -58,15 +64,27 @@ def main():
                     continue
                 k_ok, k_rl = res[key]
                 same_mask = np.array_equal(k_rl, ref_rl)
-                outcome = "same mask" if same_mask else (
-                    "same success, mask differs" if k_ok == ref_ok else "success differs"
+                outcome = (
+                    "same mask"
+                    if same_mask
+                    else (
+                        "same success, mask differs"
+                        if k_ok == ref_ok
+                        else "success differs"
+                    )
                 )
                 tally[name][outcome] += 1
-            line += f" | ml1 {int(ref_ok)}" + (f" ml10 {int(res['ml10'][0])}" if "ml10" in res else "")
+            line += f" | ml1 {int(ref_ok)}" + (
+                f" ml10 {int(res['ml10'][0])}" if "ml10" in res else ""
+            )
             if ok and ref_ok:
                 new = rl != d["rl"].astype(np.int32)
                 ref_new = ref_rl != d["rl"].astype(np.int32)
-                line += f" | changed px py {int(new.sum())} ml1 {int(ref_new.sum())} both {int((new & ref_new & (rl == ref_rl)).sum())}"
+                both = int((new & ref_new & (rl == ref_rl)).sum())
+                line += (
+                    f" | changed px py {int(new.sum())} ml1 {int(ref_new.sum())}"
+                    f" both {both}"
+                )
         rows.append(line)
     for r in rows:
         print(r)

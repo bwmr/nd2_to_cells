@@ -108,9 +108,11 @@ def main():
         ml_mask = np.asarray(cur.regs_label).astype(np.int32)
         if out.num_regs != n or not np.array_equal(out.labels, ml_mask):
             fails["mask"] += 1
+            same_shape = out.labels.shape == ml_mask.shape
+            n_px = int(np.sum(out.labels != ml_mask)) if same_shape else "shape"
             examples.append(
                 f"t={t} mask: py num_regs {out.num_regs} edited {out.edited}, "
-                f"ml num_regs {n}, differing px {int(np.sum(out.labels != ml_mask)) if out.labels.shape == ml_mask.shape else 'shape'}"
+                f"ml num_regs {n}, differing px {n_px}"
             )
         else:
             bad = []
@@ -144,7 +146,9 @@ def main():
                 )
                 ex = f"t={t} fields {bad}"
                 if k:
-                    ex += f" reg {k}: py ID {out.ID[k]} '{out.label[k]}' | ml ID {int_vec(cur, 'ID', n)[k - 1]} '{ml_lab[k]}'"
+                    ml_id = int_vec(cur, "ID", n)[k - 1]
+                    ex += f" reg {k}: py ID {out.ID[k]} '{out.label[k]}'"
+                    ex += f" | ml ID {ml_id} '{ml_lab[k]}'"
                 examples.append(ex)
         if data_r is not None:
             nr = data_r.num_regs

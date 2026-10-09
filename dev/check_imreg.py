@@ -45,7 +45,9 @@ for its in (1, 100):
     t0 = time.time()
     p = imreg.register(moving, fixed, max_iter=its, trace=trace)
     T = imreg.to_matlab_tform(p, fixed.shape)
-    print(f"max_iter {its}: {time.time() - t0:.1f} s, T = {np.array2string(T, precision=6, suppress_small=True)}")
+    t_str = np.array2string(T, precision=6, suppress_small=True)
+    print(f"max_iter {its}: {time.time() - t0:.1f} s, T = {t_str}")
     for lev in range(3):
         vals = [v for lv, v in trace if lv == lev]
-        print(f"  level {lev + 1}: {len(vals)} its, first {[f'{v:.8f}' for v in vals[:4]]}")
+        first = [f"{v:.8f}" for v in vals[:4]]
+        print(f"  level {lev + 1}: {len(vals)} its, first {first}")

@@ -97,5 +97,77 @@ Run the checks with the scripts in `dev/` (see each file's docstring):
 | Region table vs `regs.props` | `parity_assign.py` | identical, 4 positions × 361 frames |
 | Assignment, both directions, every frame pair | `parity_assign.py` | identical maps, ids, `dA`; cost within 2e-10 |
 | `errorRez` + driver, teacher-forced, splits disabled | `parity_link.py` | every frame without a split identical (xy01: 191 of 361) |
-| Split calls vs MATLAB (1 thread) | `dump_splits.py`, `matlab/oracle_splits.m`, `compare_splits.py` | see below |
-| Full run vs SuperSegger cell files | `compare_cells.py` | see below |
+| Same, with splits | `parity_link.py` | xy01: 256 of 361 frames identical; the rest differ only through split outcomes |
+| Split calls vs MATLAB (1 thread) | `dump_splits.py`, `matlab/oracle_splits.m`, `compare_splits.py` | as close as MATLAB with 10 threads (below) |
+| Full run vs SuperSegger cell files | `compare_cells.py --frames` | below |
+
+### Split calls
+
+These are all 93 `missingSeg2to1` calls of an xy01 run. Every call starts
+from the same inputs, and is compared with MATLAB on 1 thread, which matches
+the Windows reference:
+
+| | same mask | same success, other mask | success differs |
+|---|---|---|---|
+| Python port | 70 | 15 | 8 |
+| MATLAB, 10 threads | 70 | 12 | 11 |
+
+"Same mask" includes calls that fail on both sides and leave the mask
+unchanged. Per call, the port takes a median of 0.8 s (maximum 5 s). MATLAB on
+1 thread takes 37 s (maximum 87 s).
+
+### ITK v4 (SimpleITK) instead of MATLAB's v3 path
+
+`dev/compare_v4.py` runs the same 93 calls with a SimpleITK v4 registration.
+It uses the same optimizer settings, without MATLAB's per-level step schedule.
+
+The quality proxy is the mean IoU of the two new pieces with the two cells of
+the previous frame, unregistered. It is a proxy, not ground truth.
+
+| | success | real two-piece splits | IoU with previous cells | median time per call |
+|---|---|---|---|---|
+| Port (v3 path) | 52 | 23 | 0.60 | 0.8 s |
+| MATLAB, 1 thread | 54 | 24 | 0.59 | 37 s |
+| SimpleITK v4 | 60 | 60 | 0.80 | 0.6 s |
+
+The MATLAB path counts a call as successful whenever the result has at most
+two labels. More than half of those successes only relabel the region and do
+not cut it: 29 of 52 for the port, 30 of 54 for MATLAB. With the v4
+registration, every success is a real split, 60 of 93 calls.
+
+v4 agrees with the v3 path on success in only 57 of 93 calls, so adopting it
+would give up parity with SuperSegger. The port keeps the v3 path.
+
+### Full runs from the raw masks
+
+The comparison is against `cell_old/*.mat` and the err files of 260429.
+
+| | xy01 | xy02 | xy03 | xy04 |
+|---|---|---|---|---|
+| Cells, port / SuperSegger | 3469 / 3492 | 4495 / 4459 | 8229 / 8333 | 4092 / 4090 |
+| `Cell` (complete cycles) | 47 / 50 | 63 / 64 | 76 / 77 | 38 / 38 |
+| Divisions | 391 / 395 | 538 / 528 | 828 / 839 | 395 / 400 |
+| Frames with identical segmentation (of 361) | 244 | 215 | 231 | 295 |
+| First frame that differs | 6 | 21 | 23 | 50 |
+| Real cells matched (born in the same frame, largest overlap) | 1446 / 1516 | 2300 / 2427 | 3528 / 3636 | 2141 / 2184 |
+| Matched cells with identical death, divide, frames, mother, daughters and naming | 80.4 % | 78.5 % | 85.0 % | 89.3 % |
+
+About half of all IDs are ghosts: labels with no pixels. SuperSegger writes
+them as well (xy01: 1976). Cell IDs diverge after the first split that
+differs, so comparing by ID says little.
+
+Matching runs on lineage structure instead. A SuperSegger cell is matched to
+the port's cell that is born in the same frame and has the largest overlap
+with it there. Two cells count as agreeing only when their mother and
+daughters are also matched to each other.
+
+The teacher-forced checks show that the remaining differences start at split
+outcomes, and per-call split agreement is the same as MATLAB's own agreement
+across thread counts. A full MATLAB run with 10 threads was not made, so
+whole-run variation of MATLAB against itself is not measured.
+
+On xy01, `timelapse_analysis.check_cell_ok` keeps 940 of the port's cells and
+951 of SuperSegger's. The HDF5 schema is unchanged.
+
+Runtime: 32 min for xy01 run alone. Run three at a time, while MATLAB was
+also running, positions took 46–65 min.

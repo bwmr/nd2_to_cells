@@ -57,7 +57,9 @@ def main():
             "regF": np.array(regs_f, dtype=float),
             "num_regs": float(frame_c.num_regs),
         }
-        sio.savemat(out, data, do_compression=True)  # before the call, so crashes are kept
+        sio.savemat(
+            out, data, do_compression=True
+        )  # before the call, so crashes are kept
         try:
             ok = missing_seg_2to1(frame_c, reg_c, frame_r, regs_r, frame_f, regs_f)
         except RuntimeError as exc:

@@ -45,7 +45,9 @@ def register_v4(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
         im.SetOrigin((xs.start + 1.0, ys.start + 1.0))
         return im
 
-    fixed_im = to_sitk(imreg.imgaussfilt(fixed[ys, xs].astype(float), imreg.GAUSS_SIGMA))
+    fixed_im = to_sitk(
+        imreg.imgaussfilt(fixed[ys, xs].astype(float), imreg.GAUSS_SIGMA)
+    )
     moving_im = to_sitk(imreg.imgaussfilt(moving[ys, xs], imreg.GAUSS_SIGMA))
     reg = sitk.ImageRegistrationMethod()
     reg.SetMetricAsMeanSquares()
@@ -66,7 +68,9 @@ def register_v4(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
     centre.SetCenter(((w + 1) / 2, (h + 1) / 2))
     reg.SetInitialTransform(centre, inPlace=False)
     tform = reg.Execute(fixed_im, moving_im)
-    warped = sitk.Resample(to_sitk(moving[ys, xs]), fixed_im, tform, sitk.sitkNearestNeighbor, 0.0)
+    warped = sitk.Resample(
+        to_sitk(moving[ys, xs]), fixed_im, tform, sitk.sitkNearestNeighbor, 0.0
+    )
     out = np.zeros_like(moving)
     out[ys, xs] = sitk.GetArrayFromImage(warped)
     return out
@@ -74,14 +78,18 @@ def register_v4(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
 
 def run(d, register):
     mask_edit.register_masks = register
-    frame_c = SimpleNamespace(labels=d["rl"].astype(np.int32), num_regs=int(d["num_regs"]))
+    frame_c = SimpleNamespace(
+        labels=d["rl"].astype(np.int32), num_regs=int(d["num_regs"])
+    )
     frame_r = SimpleNamespace(labels=d["rlr"].astype(np.int32))
     rlf = d["rlf"]
     frame_f = SimpleNamespace(labels=rlf.astype(np.int32)) if rlf.size else None
     regs_r = [int(x) for x in np.atleast_1d(d["regR"])]
     regs_f = [int(x) for x in np.atleast_1d(d["regF"])] if np.size(d["regF"]) else []
     t0 = time.time()
-    ok = mask_edit.missing_seg_2to1(frame_c, int(d["regC"]), frame_r, regs_r, frame_f, regs_f)
+    ok = mask_edit.missing_seg_2to1(
+        frame_c, int(d["regC"]), frame_r, regs_r, frame_f, regs_f
+    )
     return ok, frame_c.labels, time.time() - t0
 
 
@@ -111,9 +119,16 @@ def quality(d, rl):
 
 def main():
     dump = Path(sys.argv[1])
-    cases = sorted(p for p in dump.glob("split_*.mat") if re.fullmatch(r"split_t\d{3}_\d{3}\.mat", p.name))
+    cases = sorted(
+        p
+        for p in dump.glob("split_*.mat")
+        if re.fullmatch(r"split_t\d{3}_\d{3}\.mat", p.name)
+    )
     v3 = mask_edit.register_masks
-    stats = {k: {"ok": 0, "t": 0.0, "qr": [], "qf": []} for k in ("v3 port", "v4 sitk", "MATLAB 1t")}
+    stats = {
+        k: {"ok": 0, "t": 0.0, "qr": [], "qf": []}
+        for k in ("v3 port", "v4 sitk", "MATLAB 1t")
+    }
     agree = 0
     for case in cases:
         d = sio.loadmat(case, squeeze_me=True)
@@ -121,7 +136,11 @@ def main():
         ml = case.with_name(case.stem + "_ml1.mat")
         if ml.exists():
             m = sio.loadmat(ml, squeeze_me=True)
-            results["MATLAB 1t"] = (bool(m["ml_success"]), m["ml_rl"].astype(np.int32), float(m["ml_time"]))
+            results["MATLAB 1t"] = (
+                bool(m["ml_success"]),
+                m["ml_rl"].astype(np.int32),
+                float(m["ml_time"]),
+            )
         agree += results["v3 port"][0] == results["v4 sitk"][0]
         line = case.stem
         for k, (ok, rl, dt) in results.items():
@@ -137,14 +156,18 @@ def main():
         print(line, flush=True)
     print(f"\n{len(cases)} split calls; v3 and v4 agree on success in {agree}")
     for k, s in stats.items():
-        n = len(cases) if k != "MATLAB 1t" else sum(
-            1 for c in cases if c.with_name(c.stem + "_ml1.mat").exists()
+        n = (
+            len(cases)
+            if k != "MATLAB 1t"
+            else sum(1 for c in cases if c.with_name(c.stem + "_ml1.mat").exists())
         )
         if not n:
             continue
         mean = lambda v: f"{np.mean(v):.3f} (n={len(v)})" if v else "-"  # noqa: E731
-        print(f"{k:10s}: success {s['ok']}/{n}, time {s['t'] / n:.1f} s/call, "
-              f"IoU with previous cells {mean(s['qr'])}, with next cells {mean(s['qf'])}")
+        print(
+            f"{k:10s}: success {s['ok']}/{n}, time {s['t'] / n:.1f} s/call, "
+            f"IoU with previous cells {mean(s['qr'])}, with next cells {mean(s['qf'])}"
+        )
 
 
 if __name__ == "__main__":

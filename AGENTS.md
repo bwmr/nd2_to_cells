@@ -76,6 +76,25 @@ Z-stack data: `export --export-z-slices` → `assemble` (instead of `align`). No
 - **Filename convention**: TIFFs are `{basename}_t{T}xy{P}c{C}.tif`; Z-slice TIFFs (written by `export --export-z-slices`, read by `assemble`) are `{basename}_t{T}xy{P}z{Z}c{C}.tif`; masks follow Omnipose pattern `*cp_masks.png`.
 - **Output replacement**: `align`/`assemble` replace `xy*/phase/` and `xy*/fluor*/`; `track` replaces its own `*.h5` output in `cell/`; `masks/` is never modified.
 
+## Linking port: design decisions
+
+Details and parity numbers are in `docs/supersegger_port.md`.
+
+- **Scope**: only `trackOpti` steps that decide lineages are ported: linking (step 4), cell marker (step 5), and the lineage fields of the cell files (step 10). Fluorescence, `CellA` geometry, foci and `clist` (steps 6–9) are not computed or saved, because downstream reads only per-cell masks, birth, death, motherID, daughterID, sisterID and divide.
+- **Bug-for-bug**: MATLAB quirks are kept on purpose and marked "MATLAB quirk". Examples: ghost (zero-area) labels, the label-collision quirk in merges, stale `death` (last frame + 1), the CellMarker stale index. Do not "fix" them without asking. Where MATLAB would error, the port raises `RuntimeError`.
+- **Reference run**: `superSeggerGui` on Windows with preset 100XEc, Minimum Cell Age 3, Remove Stray off and `CONST.ignoreerror` unset (3 passes per frame). The presets hold these GUI-effective values, not the raw SuperSegger constants files.
+- **Registration**: `imreg.py` re-implements MATLAB's `imregtform`, which runs ITK's v3 framework. SimpleITK (ITK v4) is not used at runtime; it appears only in `dev/compare_v4.py`. The reference is single-threaded `imregtform`, because Windows runs it on one thread; on macOS, use `maxNumCompThreads(1)` in MATLAB oracles.
+- **Splits are chaotic**: on the coarse pyramid levels, 1e-7 differences change the final transform. MATLAB with 10 threads does not reproduce MATLAB with 1 thread either. Judge split parity by outcome agreement rate, not exact masks. Everything except splits matches the err files exactly.
+- **Windows instead of full frames**: registration and the split watershed run on windows around the cells. Full-frame coordinates, centre, optimizer scales and pixel count are kept, so results do not depend on frame size.
+- **Behaviour MATLAB does not have**:
+  - After 20 passes on one frame (`SAFETY_MAX_PASSES`), one last pass runs without mask edits, and a warning is printed. MATLAB can loop forever there.
+  - When a watershed plateau is at least 100 000 px (`PLATEAU_FAST`), only the cells plus a 2-pixel ring are flooded; the rest is filled from the nearest label.
+- **Masks and output**:
+  - Edited masks are kept compressed in memory. No `masksOS/` is written.
+  - Ghost cells are written with empty masks, as MATLAB does.
+  - `birth`/`death` are frame numbers rather than file indices; the two only differ when a mask frame is missing.
+  - Progress is printed every 50 frames, because a 361-frame position takes 30–60 min.
+
 ## Behavioral guidelines
 
 Tradeoff: These guidelines bias toward caution over speed. For trivial tasks, use judgment.
