@@ -136,7 +136,8 @@ not cut it: 29 of 52 for the port, 30 of 54 for MATLAB. With the v4
 registration, every success is a real split, 60 of 93 calls.
 
 v4 agrees with the v3 path on success in only 57 of 93 calls, so adopting it
-would give up parity with SuperSegger. The port keeps the v3 path.
+would give up parity with SuperSegger. The port keeps the v3 path as the
+baseline; v4 will be tested later as a separate divergence.
 
 ### Full runs from the raw masks
 
