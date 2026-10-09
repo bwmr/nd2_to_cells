@@ -27,7 +27,12 @@ dependencies = [
 nd2_to_cells = "nd2_to_cells.cli:cli"
 
 [project.optional-dependencies]
-dev = ["ruff"]
+dev = ["ruff", "pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["data: needs the 260429 dataset (set ND2C_TEST_DATA)"]
 
 [tool.ruff]
 line-length = 88

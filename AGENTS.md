@@ -18,18 +18,19 @@ nd2_to_cells/      # Python package
   mask_edit.py     #   merges and splits (merge2Regions, missingSeg2to1)
   imreg.py         #   affine mask registration (MATLAB imregtform / ITK v3 path)
 dev/               # parity scripts against SuperSegger output (not packaged)
+tests/             # pytest: merge events (linking report issues A and B)
 presets/
   100XEc.toml      # E. coli defaults (default preset)
   100XPa.toml      # P. aeruginosa defaults
 ```
 
-No tests directory. No CI. No Makefile. `dev/` holds parity scripts that compare `track` with SuperSegger output (see `docs/supersegger_port.md`).
+No CI. No Makefile. `dev/` holds parity scripts that compare `track` with SuperSegger output (see `docs/supersegger_port.md`). `tests/` holds pytest tests for the merge issues of the 260429 linking report (see `docs/linking_report_tests.md`).
 
 ## Install
 
 ```bash
 pip install -e .          # runtime only
-pip install -e ".[dev]"   # + ruff
+pip install -e ".[dev]"   # + ruff, pytest
 ```
 
 Requires Python ≥ 3.11 (uses stdlib `tomllib`).
@@ -37,9 +38,19 @@ Requires Python ≥ 3.11 (uses stdlib `tomllib`).
 ## Lint and format (only dev tools)
 
 ```bash
-ruff check nd2_to_cells/   # E, F, I rules; line-length=88
-ruff format nd2_to_cells/
+ruff check nd2_to_cells/ tests/ dev/   # E, F, I rules; line-length=88
+ruff format nd2_to_cells/ tests/ dev/
 ```
+
+## Tests
+
+```bash
+pytest                                          # fast tests (seconds)
+ND2C_TEST_DATA=<260429 folder> pytest           # + real-data cases (~7 min)
+```
+
+- The tests import `nd2_to_cells` from this checkout (`pythonpath` in `pyproject.toml`), and `tests/conftest.py` refuses to run against another copy, such as an editable install of the main checkout.
+- A linking change made for the report is added as a configuration in `CONFIGS` (`tests/conftest.py`). The cases it resolves are listed in `RESOLVED` (`tests/test_report_cases.py`). The baseline must keep passing `test_baseline_event`.
 
 ## Pipeline commands (must run in order)
 
