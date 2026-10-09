@@ -11,6 +11,14 @@ described in [`supersegger_linking_reference.md`](supersegger_linking_reference.
 | OmniSegger | `SuperSegger-master/` at `254d081` |
 | Baseline presets | `presets/100XEc.toml` vs `settings/100XEc.mat` |
 
+> **Changed since `1a7eb27` (2026-10-09).** Four preset keys were renamed:
+> `overlap_limit_min` → `min_link_iou`, `small_area_merge` →
+> `fragment_merge_area`, `remove_stray` → `drop_single_frame_strays`,
+> `min_cell_age` → `min_cycle_frames`. Fragment merging, stray removal and
+> the default cycle length now follow OmniSegger more closely (D4, D13, D14).
+> The rest of this document, including the §6 runs, describes `1a7eb27`.
+> Notes marked *Changed since `1a7eb27`* say what is different now.
+
 **Scope.** From reading the masks up to deciding which cells count as a
 complete cycle (`Cell*` files). That covers pre-linking mask clean-up,
 frame-to-frame assignment, divisions, error handling, ID bookkeeping and
@@ -147,6 +155,11 @@ doc §8; confirmed). Comparison with `presets/100XEc.toml`
 | `min_cell_age` | 5 | 5 (3 from the GUI) | **No.** OmniSegger means ≥ 6 frames; `track.py` means ≥ 5, and in practice ≥ 8 (D13). |
 | `search_radius`, `min_division_age`, `min_sister_ratio`, `confident_iou` | 15, 8, 0.5, 0.3 | — | `track.py` only (documented as such) |
 
+*Changed since `1a7eb27`:* the four mismatched keys are renamed (old names still load,
+with a warning), and the preset comments no longer claim SuperSegger
+equivalence. `min_cycle_frames` is 6. The code default for
+`drop_single_frame_strays` is false; `100XEc.toml` keeps it true.
+
 ---
 
 ## 2. Workflow side by side
@@ -225,6 +238,9 @@ Each divergence gets one of three classes:
   affected. The presets present these filters as SuperSegger equivalents,
   which they aren't.
 
+*Changed since `1a7eb27`:* the preset comments no longer call these filters
+SuperSegger equivalents.
+
 ### D4. Small-region merge — *Unintended / unclear*
 
 - **OmniSegger.** `SMALL_AREA_MERGE` is only used in branches C and D of
@@ -242,6 +258,13 @@ Each divergence gets one of three classes:
   never does. OmniSegger can merge a small piece into a large sister; this
   pre-merge can't, but the re-join (D9) covers that case. At 50 px the rule
   rarely touches real cells.
+
+*Changed since `1a7eb27`:* the per-frame merge is gone. `fragment_merge_area` now
+follows OmniSegger's small-piece trigger: when a cell splits into two pieces
+and one is smaller than `fragment_merge_area`, the pieces are merged back if
+their combined area fits and they form one region after a 3×3 closing.
+OmniSegger's two next-frame triggers are not implemented. On 260429 neither
+the old rule nor the new one fires.
 
 ### D5. Candidate search — *Deliberate* (`search_radius`) / *Unintended* (`overlap_limit_min`)
 
@@ -261,6 +284,8 @@ Each divergence gets one of three classes:
   - Conversely, `track.py` ignores weak overlaps (IoU < 0.08) that OmniSegger
     would score. An example is a small daughter next to a larger sister that
     took most of the mother's footprint.
+
+*Changed since `1a7eb27`:* `overlap_limit_min` is now `min_link_iou`.
 
 ### D6. Similarity score — *Deliberate*
 
@@ -420,6 +445,10 @@ Each divergence gets one of three classes:
   6–7-frame cycles. It includes cycles OmniSegger would flag: confident links
   with large area jumps, missed divisions (D12), and the blob cycles from D10.
 
+*Changed since `1a7eb27`:* the key is now `min_cycle_frames`, with a default of 6
+(OmniSegger's 5). It still has no effect while `min_division_age` is larger,
+and there is still no error condition.
+
 ### D14. Stray removal — *Unintended / unclear*
 
 - **OmniSegger.** `REMOVE_STRAY` is effectively 0: it isn't copied from the
@@ -436,6 +465,11 @@ Each divergence gets one of three classes:
   OmniSegger. Lineages aren't affected, because these tracks have no
   relatives. The preset comment copies the nominal `.mat` value, not the
   value MATLAB actually uses.
+
+*Changed since `1a7eb27`:* the key is now `drop_single_frame_strays`, and cells in
+the first frame are kept, as in OmniSegger. The code default is false;
+`100XEc.toml` keeps it true, which still differs from OmniSegger's effective
+setting. On 260429 this keeps 11 more one-frame tracks.
 
 ### D15. ID numbering — *Unintended / unclear* (cosmetic)
 

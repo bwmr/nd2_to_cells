@@ -3,8 +3,9 @@
 Algorithm (per xy position):
     1. Enumerate mask file paths sorted by frame number (never load all at once).
     2. Stream frame pairs: load frame t and t+1, extract region properties,
-       apply area filters and small-region merging, link, then discard t.
-    3. Single pass over the masks, re-applying the same filtering and merging,
+       apply area filters, link (merging pieces of one cell where needed),
+       then discard t.
+    3. Single pass over the masks, replaying the merges made during linking,
        filling crop buffers for all tracks; then write HDF5 output.
 
 Memory design: linking holds at most 2 full labeled frames in RAM. Writing
@@ -26,6 +27,7 @@ from pathlib import Path
 import h5py
 import imageio.v3 as iio
 import numpy as np
+from scipy import ndimage
 from skimage.measure import regionprops
 from tqdm import tqdm
 
@@ -38,18 +40,27 @@ _PRESET_DIR = Path(__file__).parent.parent / "presets"
 
 @dataclass
 class TrackingParams:
-    overlap_limit_min: float = 0.08
+    min_link_iou: float = 0.08
     da_max: float = 0.3
     da_min: float = -0.2
     min_area: int = 8
     min_area_no_neigh: int = 30
-    small_area_merge: int = 50
-    remove_stray: bool = True
-    min_cell_age: int = 5
+    fragment_merge_area: int = 50
+    drop_single_frame_strays: bool = False
+    min_cycle_frames: int = 6
     search_radius: float = 15.0
     min_division_age: int = 8
     min_sister_ratio: float = 0.5
     confident_iou: float = 0.3
+
+
+# Old preset keys (SuperSegger names) still accepted; values carry over as-is.
+_DEPRECATED_KEYS = {
+    "overlap_limit_min": "min_link_iou",
+    "small_area_merge": "fragment_merge_area",
+    "remove_stray": "drop_single_frame_strays",
+    "min_cell_age": "min_cycle_frames",
+}
 
 
 def load_preset(preset: str) -> TrackingParams:
@@ -64,7 +75,21 @@ def load_preset(preset: str) -> TrackingParams:
         )
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
-    p = data.get("tracking", {})
+    p = dict(data.get("tracking", {}))
+    for old, new in _DEPRECATED_KEYS.items():
+        if old not in p:
+            continue
+        value = p.pop(old)
+        if new in p:
+            print(f"[warn] preset {path.name}: {old!r} ignored, {new!r} is also set")
+        else:
+            print(f"[warn] preset {path.name}: {old!r} is deprecated, use {new!r}")
+            p[new] = value
+    unknown = sorted(set(p) - set(TrackingParams.__dataclass_fields__))
+    if unknown:
+        print(
+            f"[warn] preset {path.name}: ignoring unknown key(s) {', '.join(unknown)}"
+        )
     return TrackingParams(
         **{k: v for k, v in p.items() if k in TrackingParams.__dataclass_fields__}
     )
@@ -200,7 +225,7 @@ def _apply_area_filters(
     regions: list[Region],
     params: TrackingParams,
 ) -> list[Region]:
-    """Discard isolated sub-threshold regions (MIN_AREA_NO_NEIGH)."""
+    """Discard isolated regions smaller than min_area_no_neigh."""
     return [
         r
         for r in regions
@@ -208,56 +233,12 @@ def _apply_area_filters(
     ]
 
 
-def _merge_small_regions(
-    labeled: np.ndarray,
-    regions: list[Region],
-    params: TrackingParams,
-    merges: dict[int, int],
-) -> tuple[np.ndarray, list[Region]]:
-    """Merge pairs of adjacent sub-threshold regions into one (in place).
-
-    Operates on the labeled array directly; no full-frame bool copies.
-    Each merge is recorded in ``merges`` (old label -> kept label) so it can be
-    replayed when masks are re-read for HDF5 output.
-    """
-    threshold = params.small_area_merge
-    small = [r for r in regions if r.area < threshold]
-    if not small:
-        return labeled, regions
-
-    merged: set[int] = set()
-    for r in small:
-        if r.label in merged:
-            continue
-        r0, c0, r1, c1 = r.bbox
-        for other in small:
-            if other.label == r.label or other.label in merged:
-                continue
-            or0, oc0, or1, oc1 = other.bbox
-            # Adjacent = bboxes within 1px of each other
-            if r1 < or0 - 1 or or1 < r0 - 1 or c1 < oc0 - 1 or oc1 < c0 - 1:
-                continue
-            labeled[labeled == other.label] = r.label
-            merges[other.label] = r.label
-            merged.add(other.label)
-            break
-
-    if not merged:
-        return labeled, regions
-
-    # Rebuild region list from updated labeled image, keeping only regions that
-    # survived earlier filtering (filtered labels are still present in `labeled`)
-    kept = {r.label for r in regions} - merged
-    return labeled, [r for r in _extract_regions(labeled, params) if r.label in kept]
-
-
 def _load_clean_frame(
-    path: Path, params: TrackingParams, merges: dict[int, int]
+    path: Path, params: TrackingParams
 ) -> tuple[np.ndarray, list[Region]]:
-    """Load one mask and apply area filters + small-region merging."""
+    """Load one mask and apply area filters."""
     labeled = _load_mask(path)
-    regions = _apply_area_filters(_extract_regions(labeled, params), params)
-    return _merge_small_regions(labeled, regions, params, merges)
+    return labeled, _apply_area_filters(_extract_regions(labeled, params), params)
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +286,24 @@ def _merge_region_pair(labeled: np.ndarray, keep: Region, drop: Region) -> Regio
     )
 
 
+def _closes_to_one_region(labeled: np.ndarray, a: Region, b: Region) -> bool:
+    """True if ``a`` and ``b`` form one region after a 3x3 closing.
+
+    Same test as OmniSegger's merge2Regions (imdilate + imerode with a 3x3
+    square, then 8-connected bwlabel), on the union bbox plus a 2 px margin.
+    """
+    r0, c0, r1, c1 = _union_bbox([a.bbox, b.bbox])
+    H, W = labeled.shape
+    crop = labeled[max(r0 - 2, 0) : min(r1 + 2, H), max(c0 - 2, 0) : min(c1 + 2, W)]
+    square = np.ones((3, 3), dtype=bool)
+    closed = ndimage.binary_erosion(
+        ndimage.binary_dilation((crop == a.label) | (crop == b.label), square),
+        square,
+        border_value=1,  # like imerode, outside the image counts as foreground
+    )
+    return ndimage.label(closed, square)[1] == 1
+
+
 def link_frames_streaming(
     mask_paths: list[tuple[int, Path]],
     params: TrackingParams,
@@ -329,9 +328,7 @@ def link_frames_streaming(
 
     # Load first frame
     frame_0, path_0 = mask_paths[0]
-    labeled_prev, regions_prev = _load_clean_frame(
-        path_0, params, merges.setdefault(frame_0, {})
-    )
+    labeled_prev, regions_prev = _load_clean_frame(path_0, params)
 
     # Initialise tracks for first frame
     for r in regions_prev:
@@ -350,7 +347,7 @@ def link_frames_streaming(
     for fi in range(1, n_frames):
         frame_cur, path_cur = mask_paths[fi]
         frame_merges = merges.setdefault(frame_cur, {})
-        labeled_cur, regions_cur = _load_clean_frame(path_cur, params, frame_merges)
+        labeled_cur, regions_cur = _load_clean_frame(path_cur, params)
 
         claimed: set[int] = set()
         new_active: dict[int, int] = {}
@@ -394,7 +391,7 @@ def link_frames_streaming(
                         r1.bbox,
                         r1.area,
                     )
-                    if iou >= params.overlap_limit_min:
+                    if iou >= params.min_link_iou:
                         candidates_iou.append((iou, r1))
                         continue
 
@@ -449,8 +446,16 @@ def link_frames_streaming(
                     min(r1a.area, r1b.area) / max(r1a.area, r1b.area)
                     >= params.min_sister_ratio
                 )
+                # As in OmniSegger, a piece below fragment_merge_area is merged
+                # into its sister instead of becoming a daughter, if the two
+                # pieces close into one region.
+                small_piece = (
+                    area_fits
+                    and min(r1a.area, r1b.area) < params.fragment_merge_area
+                    and _closes_to_one_region(labeled_cur, r1a, r1b)
+                )
 
-                if area_fits and old_enough and sisters_similar:
+                if area_fits and old_enough and sisters_similar and not small_piece:
                     tracks[tid].divide = True
                     tid_a = next_id
                     next_id += 1
@@ -471,9 +476,9 @@ def link_frames_streaming(
                         )
                         new_active[r1_d.label] = tid_d
                         claimed.add(r1_d.label)
-                elif area_fits and candidates_iou:
-                    # Rejected division of two overlapping pieces: re-join them
-                    # and keep the mother's identity.
+                elif small_piece or (area_fits and candidates_iou):
+                    # Small piece, or rejected division of two overlapping
+                    # pieces: re-join them and keep the mother's identity.
                     merged = _merge_region_pair(labeled_cur, r1a, r1b)
                     frame_merges[r1b.label] = r1a.label
                     regions_cur = [
@@ -512,12 +517,18 @@ def link_frames_streaming(
         # labeled_prev now holds the only frame in memory
 
     # Remove stray single-frame tracks with no predecessor and no daughters.
-    # Skip when n_frames == 1: every track is single-frame by definition.
-    if params.remove_stray and n_frames > 1:
+    # As in OmniSegger, cells in the first frame are kept: the movie starts
+    # there, so they can't have a predecessor.
+    if params.drop_single_frame_strays:
         tracks = {
             tid: t
             for tid, t in tracks.items()
-            if not (not t.has_predecessor and len(t.frames) == 1 and not t.divide)
+            if not (
+                not t.has_predecessor
+                and len(t.frames) == 1
+                and not t.divide
+                and t.frames[0] != frame_0
+            )
         }
 
     return tracks, merges
@@ -650,11 +661,15 @@ def _fill_buffers(
 
 
 def _is_complete(track: "Track", params: TrackingParams) -> bool:
-    """Complete cell cycle: born from an observed division, divides, long enough."""
+    """Complete cell cycle: born from an observed division, divides, long enough.
+
+    A track born during the movie can't divide before min_division_age frames,
+    so min_cycle_frames only has an effect if it is larger than that.
+    """
     return (
         track.mother_id != 0
         and track.divide
-        and len(track.frames) >= params.min_cell_age
+        and len(track.frames) >= params.min_cycle_frames
     )
 
 
@@ -802,9 +817,8 @@ def _track_position(
 
 def _track_position_wrapper(args) -> str | None:
     """Run one position; return an error message instead of raising."""
-    xy_dir, preset_str, pad, consolidated = args
+    xy_dir, params, pad, consolidated = args
     try:
-        params = load_preset(preset_str)
         _track_position(Path(xy_dir), params, pad, consolidated)
     except Exception as exc:
         import traceback
@@ -849,12 +863,13 @@ def run_track(
     params = load_preset(preset)
     print(
         f"Tracking {len(xy_dirs)} position(s) with preset '{preset}' "
-        f"(overlap_limit_min={params.overlap_limit_min}, "
+        f"(min_link_iou={params.min_link_iou}, "
         f"da_min={params.da_min}, da_max={params.da_max}, "
-        f"remove_stray={params.remove_stray})"
+        f"drop_single_frame_strays={params.drop_single_frame_strays})"
     )
 
-    args = [(str(d), preset, pad, consolidated) for d in xy_dirs]
+    # Pass the loaded params (picklable) so preset warnings print only once.
+    args = [(str(d), params, pad, consolidated) for d in xy_dirs]
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             errors = list(
