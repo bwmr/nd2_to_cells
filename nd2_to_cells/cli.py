@@ -253,7 +253,7 @@ def track_cmd(data_dir, preset, workers, pad, consolidated):
 
     By default, writes one file per tracked cell: cell{ID:07d}.h5
     (lowercase) or Cell{ID:07d}.h5 (uppercase, capital C = complete cell
-    cycle: both birth and division observed, length >= min_cell_age).
+    cycle: both birth and division observed, length >= min_cycle_frames).
 
     With --consolidated, writes a single cells.h5 per position where each
     cell is stored as a group (e.g. cells.h5/Cell0000002/mask).

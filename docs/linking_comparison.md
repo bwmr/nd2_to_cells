@@ -11,16 +11,25 @@ described in [`supersegger_linking_reference.md`](supersegger_linking_reference.
 | OmniSegger | `SuperSegger-master/` at `254d081` |
 | Baseline presets | `presets/100XEc.toml` vs `settings/100XEc.mat` |
 
+> **Changed since `1a7eb27` (2026-10-09).** Four preset keys were renamed:
+> `overlap_limit_min` → `min_link_iou`, `small_area_merge` →
+> `fragment_merge_area`, `remove_stray` → `drop_single_frame_strays`,
+> `min_cell_age` → `min_cycle_frames`. Fragment merging, stray removal and
+> the default cycle length now follow OmniSegger more closely (D4, D13, D14).
+> The rest of this document, including the §6 runs, describes `1a7eb27`.
+> Notes marked *Changed since `1a7eb27`* say what is different now.
+
 **Scope.** From reading the masks up to deciding which cells count as a
 complete cycle (`Cell*` files). That covers pre-linking mask clean-up,
 frame-to-frame assignment, divisions, error handling, ID bookkeeping and
 complete-cycle marking. Fluorescence, cell geometry, `clist` and file contents
 are left out, except where they affect lineages.
 
-**Method.** I only read code; nothing was run. Every OmniSegger claim used
-here was checked against the MATLAB source. Errors found in the reference doc
-have been fixed there and are listed in §5. Behaviour that depends on runtime details I couldn't check is
-marked *inferred*. Line numbers are `track.py:N` for this repo and
+**Method.** §1–§5 come from reading code. Every OmniSegger claim used here
+was checked against the MATLAB source. Errors found in the reference doc have
+been fixed there and are listed in §5. Behaviour that depends on runtime
+details I couldn't check is marked *inferred*. §6 reports runs of both tools
+on the 260429 test data. Line numbers are `track.py:N` for this repo and
 `file.m:N` (relative to `SuperSegger-master/`) for OmniSegger.
 
 ---
@@ -46,8 +55,9 @@ marked *inferred*. Line numbers are `track.py:N` for this repo and
    other carries the two-cell blob. When the blob separates again, the
    re-join rule keeps it together until the track is `min_division_age`
    frames old, and only then records a division. This gives false cycles of
-   about `min_division_age` frames, which is consistent with the 8–9-frame
-   cycles left on 260429 after the division gate was added (D10).
+   about `min_division_age` frames. On 260429, 40 % of `track.py`'s observed
+   cycles are 8–9 frames long, and most of those show this pattern (D10,
+   §6).
 4. **The complete-cycle rule differs.** OmniSegger requires ≥ 6 observed
    frames and no flagged error since birth (≥ 4 frames when run from the GUI).
    `track.py` checks `len(frames) ≥ min_cell_age` (5), but that test can never
@@ -68,7 +78,12 @@ marked *inferred*. Line numbers are `track.py:N` for this repo and
    `processExp` sets it to 0, which removes the iteration cap. The GUI leaves
    it unset (cap applies), and 1 turns off merges and splits. For
    over-segmentation, a run with `ignoreerror = 1` is furthest from `track.py`.
-   For under-segmentation, it is the closest.
+   For under-segmentation, it is the closest. On 260429, `processExp`'s
+   setting never finishes (§6.2).
+8. **The checks on 260429 confirm D10–D13** (§6). They also show that
+   OmniSegger's own output is noisy: half the cell IDs in the capped run are
+   zero-area ghosts, and it still records hundreds of cycles shorter than 8
+   frames. Agreement with OmniSegger is therefore not a target in itself.
 
 ---
 
@@ -116,10 +131,12 @@ What this means for comparing with `track.py`:
   differences are that OmniSegger flags it and chooses by cost, while
   `track.py` chooses by label order and the IoU gate. With field = 0 or
   absent, OmniSegger splits the mask and both lineages survive.
-- **Recommendation.** Use `processExp` (field = 0) as the reference. It is the
-  documented command-line path. Run field = 1 as a second reference to
-  separate assignment differences from mask-editing differences. Write down
-  `MIN_CELL_AGE` for any GUI run.
+- **Recommendation.** Use the capped configuration (field unset) as the
+  reference. `processExp`'s field = 0 would be the natural choice, since it
+  is the documented command-line path, but on 260429 it never finishes
+  (§6.2). Run field = 1 as a second reference to separate assignment
+  differences from mask-editing differences. Write down `MIN_CELL_AGE` for
+  any GUI run.
 
 ### 1.2 Parameters
 
@@ -137,6 +154,11 @@ doc §8; confirmed). Comparison with `presets/100XEc.toml`
 | `remove_stray` | true [false] | 0 for both (the Ec `.mat` has 1, but it isn't copied) | **No.** The value differs for Ec, and so does the mechanism (D14). |
 | `min_cell_age` | 5 | 5 (3 from the GUI) | **No.** OmniSegger means ≥ 6 frames; `track.py` means ≥ 5, and in practice ≥ 8 (D13). |
 | `search_radius`, `min_division_age`, `min_sister_ratio`, `confident_iou` | 15, 8, 0.5, 0.3 | — | `track.py` only (documented as such) |
+
+*Changed since `1a7eb27`:* the four mismatched keys are renamed (old names still load,
+with a warning), and the preset comments no longer claim SuperSegger
+equivalence. `min_cycle_frames` is 6. The code default for
+`drop_single_frame_strays` is false; `100XEc.toml` keeps it true.
 
 ---
 
@@ -216,6 +238,9 @@ Each divergence gets one of three classes:
   affected. The presets present these filters as SuperSegger equivalents,
   which they aren't.
 
+*Changed since `1a7eb27`:* the preset comments no longer call these filters
+SuperSegger equivalents.
+
 ### D4. Small-region merge — *Unintended / unclear*
 
 - **OmniSegger.** `SMALL_AREA_MERGE` is only used in branches C and D of
@@ -233,6 +258,13 @@ Each divergence gets one of three classes:
   never does. OmniSegger can merge a small piece into a large sister; this
   pre-merge can't, but the re-join (D9) covers that case. At 50 px the rule
   rarely touches real cells.
+
+*Changed since `1a7eb27`:* the per-frame merge is gone. `fragment_merge_area` now
+follows OmniSegger's small-piece trigger: when a cell splits into two pieces
+and one is smaller than `fragment_merge_area`, the pieces are merged back if
+their combined area fits and they form one region after a 3×3 closing.
+OmniSegger's two next-frame triggers are not implemented. On 260429 neither
+the old rule nor the new one fires.
 
 ### D5. Candidate search — *Deliberate* (`search_radius`) / *Unintended* (`overlap_limit_min`)
 
@@ -252,6 +284,8 @@ Each divergence gets one of three classes:
   - Conversely, `track.py` ignores weak overlaps (IoU < 0.08) that OmniSegger
     would score. An example is a small daughter next to a larger sister that
     took most of the mother's footprint.
+
+*Changed since `1a7eb27`:* `overlap_limit_min` is now `min_link_iou`.
 
 ### D6. Similarity score — *Deliberate*
 
@@ -351,9 +385,9 @@ Each divergence gets one of three classes:
   - The HDF5 masks show two cells as one in the frames in between.
   - If two sisters re-merge soon after a real division, or cells in a cluster
     flicker repeatedly, the false cycles come out ≈ `min_division_age` frames
-    long. That is consistent with the 8–9-frame cycles left on 260429. The
-    cause is segmentation, as the earlier review concluded, but the cycle
-    length is set by this linker rule, not by biology. For a check, see §4.
+    long. The cause is segmentation, as the earlier review concluded, but the
+    cycle length is set by this linker rule, not by biology. On 260429 this
+    accounts for more than half of the 8–9-frame cycles (§6.4).
 
 ### D11. Area change on a 1:1 link — *Unintended / unclear* (partly *Deliberate*: `confident_iou`, fix C)
 
@@ -411,6 +445,10 @@ Each divergence gets one of three classes:
   6–7-frame cycles. It includes cycles OmniSegger would flag: confident links
   with large area jumps, missed divisions (D12), and the blob cycles from D10.
 
+*Changed since `1a7eb27`:* the key is now `min_cycle_frames`, with a default of 6
+(OmniSegger's 5). It still has no effect while `min_division_age` is larger,
+and there is still no error condition.
+
 ### D14. Stray removal — *Unintended / unclear*
 
 - **OmniSegger.** `REMOVE_STRAY` is effectively 0: it isn't copied from the
@@ -427,6 +465,11 @@ Each divergence gets one of three classes:
   OmniSegger. Lineages aren't affected, because these tracks have no
   relatives. The preset comment copies the nominal `.mat` value, not the
   value MATLAB actually uses.
+
+*Changed since `1a7eb27`:* the key is now `drop_single_frame_strays`, and cells in
+the first frame are kept, as in OmniSegger. The code default is false;
+`100XEc.toml` keeps it true, which still differs from OmniSegger's effective
+setting. On 260429 this keeps 11 more one-frame tracks.
 
 ### D15. ID numbering — *Unintended / unclear* (cosmetic)
 
@@ -464,8 +507,10 @@ differ at one of these points, the difference comes from OmniSegger.
 
 ## 4. Checks on a shared dataset
 
-Run OmniSegger via `processExp` (`ignoreerror = 0`), and again with
-`ignoreerror = 1`. Run `track.py` with `100XEc.toml`. Then compare:
+Run OmniSegger with `ignoreerror` unset (3-pass cap), and again with
+`ignoreerror = 1`. (`processExp`'s `ignoreerror = 0` doesn't finish on
+260429, §6.2.) Run `track.py` with `100XEc.toml`. Then compare the items
+below. The results for 260429 are in §6.
 
 1. **Cycle-length histograms** of cells born from a division, per tool. In
    `track.py`, check whether cycles of `min_division_age`–`min_division_age + 1`
@@ -563,3 +608,163 @@ records what changed. Section numbers refer to that file.
   stays as well, and `daughterID` points at IDs that are re-issued after the
   `cell_count` rollback.
 - **§10.** Out of date. It has been replaced by this document.
+
+---
+
+## 6. Results on 260429
+
+The §4 checks were run on 2026-10-08/09, on a copy of
+`amp_testing/01_SW5-20-1_2xMIC/260429`: 361 frames at 1 min/frame, AMP added
+at frame 22. Results cover **xy01, xy02 and xy04**. xy03 was dropped because
+the capped OmniSegger run had slowed to about 50 minutes per frame and was
+stopped at frame 346 of 361.
+
+The run scripts, exports and logs were temporary and haven't been kept.
+
+### 6.1 Setup
+
+- **Input.** Phase images and Omnipose masks only; fluorescence was left out.
+- **`track.py`.** At `1a7eb27` with `100XEc.toml`, run through
+  `link_frames_streaming`, which is the linking step of `nd2_to_cells track`.
+- **OmniSegger.** At `254d081`, in MATLAB R2026b, through
+  `BatchSuperSeggerOpti` stages 3–5 (mask import, linking,
+  `trackOptiCellMarker`). CONST is built as in `processExp`, but with the
+  `100XEc` preset, no alignment and no foci.
+- **Two OmniSegger configurations.**
+  - **Capped:** `ignoreerror` unset, so the 3-pass cap applies. This is the
+    GUI / `loadConstants` behaviour, except that `MIN_CELL_AGE` is 5.
+  - **`ignoreerror = 1`:** no merges or splits except F's subset merge.
+
+  Both configurations link the same imported masks.
+- **One change to OmniSegger, for speed.** `find_medoid` skeletonised a
+  full-frame mask for every cell, about 0.57 s per cell per call, and linking
+  calls it on two frames per pass. It was replaced by a version that works on
+  the cell's bounding box, with 2 px of padding. On four test
+  frames with 21–178 cells, the resulting seg files were identical to the
+  original's in every field (`isequaln`). The medoid isn't read by linking.
+- **Matching cells between tools.** By birth frame and the Omnipose label
+  the cell started from. This is approximate, because OmniSegger relabels
+  regions it merges or splits.
+- **Runtime.**
+  - `track.py`: 15–22 s per position.
+  - OmniSegger mask import: 6 min for all positions on 10 workers.
+  - OmniSegger linking with `ignoreerror = 1`: 65 min for all positions.
+  - OmniSegger linking, capped: 8.5–11.3 h per position (wall clock, part of
+    it with the computer asleep).
+
+### 6.2 `processExp`'s setting doesn't finish
+
+With `ignoreerror = 0`, OmniSegger never gets past xy01 frame 6. A verbose
+run of frames 1–7 shows why:
+
+1. Region 6 is two previous cells in one mask (branch E), so
+   `missingSeg2to1` is called.
+2. The watershed puts only label 2 inside the region. The
+   `max(label) == 2` test accepts it anyway: the region is relabelled
+   `num_regs + 2`, and labels 6 and `num_regs + 1` are left empty.
+3. The frame re-runs. The relabelled region is again two cells in one, so
+   the same thing happens with the next two labels.
+
+Each pass adds two zero-area labels, and without the cap the loop never ends.
+This is the `missingSeg2to1` quirk and the ghost regions from §3, together
+with reference doc §9.1.
+
+### 6.3 Summary
+
+| | `track.py` | OmniSegger, capped | OmniSegger, `ignoreerror = 1` |
+|---|---|---|---|
+| Cell IDs | 3,298 | 12,051 | 8,011 |
+| of which zero-area for their whole life | 0 | 5,913 | 131 |
+| one-frame IDs | 348 | 7,809 | 3,037 |
+| Divisions | 871 | 1,327 | 2,512 |
+| Observed cycles (born from a division, divide) | 671 | 882 | 2,282 |
+| Median cycle length (frames) | 11 | 7 | 4 |
+| `Cell` | 671 | 128 | 226 |
+| `Cell` with the GUI's `MIN_CELL_AGE` of 3 | — | 153 | 273 |
+
+Rebuilding OmniSegger's complete-cycle rule from the exported fields
+reproduces `trackOptiCellMarker` exactly (128 and 226). This confirms the
+reference doc's description of that rule.
+
+### 6.4 Checks
+
+**1. Cycle lengths (D10).** The table shows observed cycles per length. The
+second number is the share whose sister was "absorbed": the sister lasted
+≤ 2 frames without dividing, and the cell's area grew ≥ 1.5× in the frame
+after the sister ended.
+
+| Cycle length (frames) | `track.py` | OmniSegger, capped | OmniSegger, `ignoreerror = 1` |
+|---|---|---|---|
+| 1–7 | 0 | 484 · 17 % | 1,544 · 39 % |
+| 8–9 | **267 · 54 %** | 52 · 8 % | 135 · 21 % |
+| 10–14 | 130 · 52 % | 89 · 9 % | 187 · 21 % |
+| ≥ 15 | 274 · 22 % | 257 · 3 % | 416 · 13 % |
+
+- 40 % of `track.py`'s cycles fall at `min_division_age` (8–9 frames), and
+  more than half of those absorbed their sister. That is the D10 mechanism.
+- The share grows during the movie: 8–9-frame cycles make up 16 % of cycles
+  born in frames 1–60, and 47 % of those born after frame 240. This fits the
+  earlier finding that the remaining short cycles sit in late, clustered
+  cells.
+- OmniSegger rarely shows the absorbed-sister pattern (8 % in the capped
+  run). It records flicker as short cycles instead. Its mask edits cut those
+  about threefold compared with `ignoreerror = 1`, but don't remove them.
+
+**2. `Cell` sets.** The sets barely overlap.
+
+| | vs. capped | vs. `ignoreerror = 1` |
+|---|---|---|
+| `Cell` in both | 41 | 59 |
+| `Cell` only in `track.py` | 630 | 612 |
+| — no OmniSegger cell born from the same region | 361 | 160 |
+| — OmniSegger cell doesn't divide | 138 | 175 |
+| — OmniSegger cell has `ehist = 1` | 81 | 243 |
+| — OmniSegger cell not born from a division | 35 | 4 |
+| — OmniSegger cell has < 6 frames | 15 | 30 |
+| `Cell` only in OmniSegger | 87 | 167 |
+| — no `track.py` track born from the same region | 79 | 152 |
+
+**3. Lineage breaks from rejected links (D11).** 108 `track.py` tracks start
+without a mother in the frame after another track ended at an overlapping
+region. In 92 of them the overlap is real (IoU 0.08–0.3) but the area
+change is outside `track.py`'s limits, so the link was refused. OmniSegger
+continues the lineage in 67 of these (capped) or 66 (`ignoreerror = 1`).
+
+**4. Area drops below 0.65× within a lineage (D12, D13).**
+- `track.py` has 1,050 such drops, and 110 `Cell`s contain one. OmniSegger
+  records a division at the same place for 114 of the drops (capped) or 182
+  (`ignoreerror = 1`).
+- OmniSegger has 1,192 (capped) and 861 (`ignoreerror = 1`) drops of its own.
+  All are flagged, so none ends up in a `Cell`.
+
+**5. OmniSegger artefacts.**
+- **Ghosts.** The capped run has 5,913 cell IDs that are zero-area for their
+  whole life, half of all its IDs. They are labels left empty by merges and
+  failed splits. The `ignoreerror = 1` run, which barely edits masks, has
+  131.
+- **Masks in several pieces.** 638 regions (capped) and 133
+  (`ignoreerror = 1`) have more than one connected component.
+- **Other error labels in the capped run:** 59 "Error not fixed" and 152
+  "Converted into a new cell".
+- **For comparison:** `track.py` replayed 4,863 region merges (small-region
+  merges and re-joins) into its output masks.
+
+### 6.5 What this shows
+
+- **D10 is confirmed, and it is the main source of `track.py`'s short
+  cycles.** The 8–9-frame peak comes from the re-join rule acting on
+  under-segmentation in late, crowded frames. OmniSegger doesn't produce it.
+- **D13 is confirmed.** `min_cell_age` has no effect: every observed
+  `track.py` cycle is a `Cell` (671 of 671).
+- **D11 and D12 are confirmed.** `track.py` breaks lineages that OmniSegger
+  keeps, and continues lineages through halvings that OmniSegger flags. Both
+  affect the `Cell` set.
+- **OmniSegger is not a ground truth on this data.**
+  - Half of the capped run's cell IDs are ghosts.
+  - It records 484 cycles shorter than 8 frames even with mask editing.
+  - Its two configurations disagree with each other by almost a factor of
+    two in `Cell`s (128 vs 226).
+  - The default `processExp` setting can't finish at all.
+
+  A low overlap between the `Cell` sets says that both tools struggle with
+  this movie's late frames. It doesn't say which one is right.

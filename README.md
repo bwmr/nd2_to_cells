@@ -183,8 +183,21 @@ Tracking parameters are stored in `presets/` as TOML files. Available presets:
 - `100XEc` — *E. coli*, 100x objective, 60 nm/px
 - `100XPa` — *P. aeruginosa*, 100x objective, 60 nm/px
 
-Parameters are derived from the corresponding SuperSegger `.mat` preset files,
-except `search_radius`, `min_division_age`, `min_sister_ratio` and
-`confident_iou`, which have no SuperSegger counterpart.
+Some values are taken from the corresponding SuperSegger `.mat` preset files,
+but no key behaves exactly like its SuperSegger counterpart; the comments in
+`presets/100XEc.toml` say what each key does. `search_radius`,
+`min_division_age`, `min_sister_ratio` and `confident_iou` have no SuperSegger
+counterpart.
+
+`min_cycle_frames` (default `6`) is the number of observed frames a cycle
+needs to count as complete (`Cell*` files). A track born during the movie
+can't divide before `min_division_age` frames, so `min_cycle_frames` only has
+an effect if it is larger than `min_division_age`.
+
+Presets that use the earlier key names still load, with a warning naming the
+new key: `overlap_limit_min` → `min_link_iou`, `small_area_merge` →
+`fragment_merge_area`, `remove_stray` → `drop_single_frame_strays`,
+`min_cell_age` → `min_cycle_frames`. Values carry over unchanged. Unknown keys
+are ignored with a warning.
 Pass a preset name (`--preset 100XEc`, looked up in `presets/`) or a path to
 your own `.toml` (`--preset /path/to/custom.toml`).
