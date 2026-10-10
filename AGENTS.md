@@ -46,7 +46,7 @@ ruff format nd2_to_cells/ tests/ dev/
 
 ```bash
 pytest                                          # fast tests (seconds)
-ND2C_TEST_DATA=<260429 folder> pytest           # + real-data cases (~7 min)
+ND2C_TEST_DATA=<260429 folder> pytest -k "baseline or combined"   # + real data, ~7 min per config
 ```
 
 - The tests import `nd2_to_cells` from this checkout (`pythonpath` in `pyproject.toml`), and `tests/conftest.py` refuses to run against another copy, such as an editable install of the main checkout.
@@ -79,7 +79,7 @@ Z-stack data: `export --export-z-slices` → `assemble` (instead of `align`). No
 
 ## Architecture notes
 
-- **Memory design**: `align.py` holds at most 2 frames; `assemble.py` holds one timepoint's Z-stack. `track.py` holds 3 label frames (previous, current, next) while linking, plus scalar region tables for all frames and compressed copies of edited masks; the writing step keeps crop buffers for all tracks until the end, so memory grows with movie length × cell count. Do not load full stacks.
+- **Memory design**: `align.py` holds at most 2 frames; `assemble.py` holds one timepoint's Z-stack. `track.py` holds 3 label frames (previous, current, next) while linking, plus scalar region tables for all frames and compressed copies of edited masks; the writing step keeps crop buffers for all tracks until the end, so memory grows with movie length × cell count. With the label-collision quirk (the baseline), some tracks span distant cells and their crops approach the full frame: up to 10 GB per position on 260429, against 1–2 GB with the `label_collision` fix. Do not load full stacks.
 - **Linking port**: `link.py`/`assign.py`/`mask_edit.py`/`imreg.py` reproduce SuperSegger bug-for-bug (MATLAB quirks are kept and marked "MATLAB quirk"). Labels are 1-based: per-region arrays have an unused index 0. Check changes with the `dev/` parity scripts.
 - **Parallelism**: `ProcessPoolExecutor` per xy position. Worker entry points are module-level picklable wrappers (`_align_position_wrapper`, `_assemble_position_wrapper`, `_track_position_wrapper`).
 - **Preset resolution**: `load_preset()` first tries the argument as a path; if not found, looks in `presets/{name}.toml`. Custom presets can be passed as a file path.

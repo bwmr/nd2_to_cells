@@ -54,25 +54,45 @@ CASES = {
     "xy04_B": Case("xy04", 198, 188, (689, 1663), (657, 1667), "B"),
 }
 
-# Cases each configuration is expected to resolve.
+# Cases each configuration is expected to resolve (measured on 260429).
+NINE = {
+    "report_fig_A",
+    "report_fig_B",
+    "xy01_A",
+    "xy01_B",
+    "xy02_A",
+    "xy02_B",
+    "xy03_A",
+    "xy04_A",
+    "xy04_B",
+}
 RESOLVED: dict[str, set[str]] = {
     "baseline": set(),
     "label_collision": {"report_fig_A"},
     "area_penalty": set(),
     "split_needs_two": set(),
-    "itk_v4": set(),
+    "itk_v4": {"xy04_A"},
     "lookahead3": set(),
-    "lookahead5": set(),
-    "seeded_split": set(),
-    "end_on_merge": set(),
+    "seeded_split": {"xy01_A"},
+    "end_on_merge": {
+        "report_fig_B",
+        "xy01_A",
+        "xy01_B",
+        "xy02_A",
+        "xy02_B",
+        "xy04_A",
+        "xy04_B",
+    },
     "assign_bookkeeping": set(),
     "errorrez_bookkeeping": set(),
-    "merge_fallback": set(),
-    "lc_itk_v4": set(),
-    "lc_seeded_split": set(),
-    "lc_merge_fallback": set(),
-    "lc_lookahead3": set(),
-    "lc_lookahead5": set(),
+    "lc_itk_v4": {"report_fig_A", "xy03_A", "xy04_A"},
+    "lc_seeded_split": NINE,
+    "lc_merge_fallback": {"report_fig_A"},
+    "lc_lookahead3": {"report_fig_A"},
+    "combined": NINE,
+    "combined_end": NINE,
+    "lc_seeded_orphan": NINE,
+    "combined_orphan": NINE,
 }
 
 _runs: dict[tuple[str, str], dict[int, Track]] = {}

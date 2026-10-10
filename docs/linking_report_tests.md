@@ -47,7 +47,11 @@ Events per position, on full runs of 361 frames:
 
 - "Port" is the bug-for-bug SuperSegger port on this branch.
 - "IoU" is `main`'s IoU linker: the `cells.h5` of 2026-10-07 that the report
-  analysed, which predates PR #4.
+  analysed, which predates PR #4. `main` at 19fc751, after PR #4, gives
+  nearly the same counts: A 1077, B 1027, far 3. It resolves 1 of the 10
+  real-data cases and fails both synthetic fusions.
+- The opt-in fixes and their results are in
+  [`matlab_quirks.md`](matlab_quirks.md).
 
 Findings:
 - **A** is about as common in both linkers.
@@ -69,7 +73,9 @@ ND2C_TEST_DATA=".../amp_testing/01_SW5-20-1_2xMIC/260429" pytest   # + real data
 ```
 
 Every test that takes the `config` fixture runs once per configuration in
-`CONFIGS`. With real data, that costs about 7 min per configuration.
+`CONFIGS`. With real data, that costs about 7 min per configuration, and
+there are 18. To run some of them only, select by name: for example
+`pytest -k "baseline or combined"`.
 
 | File | What it checks |
 |---|---|

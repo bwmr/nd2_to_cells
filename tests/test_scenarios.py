@@ -113,3 +113,21 @@ def test_unmergeable_split_keeps_mother(tmp_path, config):
     tracks = link(tmp_path, frames, config)
     born = [tr for tr in tracks.values() if tr.frames[0] == 4]
     assert born and all(tr.mother for tr in born)
+
+
+def test_small_neighbour_fuses(tmp_path, config, request):
+    """Issue B: a small cell fuses with a large one, within the area tolerance.
+
+    The assignment links the fused region to the large cell only, so errorRez
+    sees no 2 -> 1 and tries no split (fixed by "orphan_split").
+    """
+    if "orphan_split" not in CONFIGS[config].get("fixes", []):
+        mark = pytest.mark.xfail(strict=True, raises=AssertionError, reason="open")
+        request.applymarker(mark)
+    frames = []
+    for t, length in enumerate(growing(150, 10)):
+        big = (40, 40 + length)
+        small = (40 + length + 3, 40 + length + 3 + 28)
+        frames.append([(big[0], small[1])] if t >= 5 else [big, small])
+    tracks = link(tmp_path, movie(frames), config)
+    assert [e for e in find_events(tracks) if e.kind == "B"] == []

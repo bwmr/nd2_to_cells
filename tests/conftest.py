@@ -30,7 +30,6 @@ CONFIGS: dict[str, dict] = {
     "split_needs_two": {"fixes": ["split_needs_two"]},
     "itk_v4": {"fixes": ["itk_v4"]},
     "lookahead3": {"division_lookahead": 3},
-    "lookahead5": {"division_lookahead": 5},
     "seeded_split": {"fixes": ["seeded_split"]},
     "end_on_merge": {"fixes": ["end_on_merge"]},
     "assign_bookkeeping": {
@@ -45,14 +44,49 @@ CONFIGS: dict[str, dict] = {
     "errorrez_bookkeeping": {
         "fixes": ["division_both_sisters", "f_no_match", "f_gate"]
     },
-    "merge_fallback": {"fixes": ["merge_fallback"]},
     # On top of label_collision, which removes the far events that every
     # extra mask edit otherwise adds through label collisions:
     "lc_itk_v4": {"fixes": ["label_collision", "itk_v4"]},
     "lc_seeded_split": {"fixes": ["label_collision", "seeded_split"]},
     "lc_merge_fallback": {"fixes": ["label_collision", "merge_fallback"]},
     "lc_lookahead3": {"fixes": ["label_collision"], "division_lookahead": 3},
-    "lc_lookahead5": {"fixes": ["label_collision"], "division_lookahead": 5},
+    # The fixes that helped on 260429, together:
+    "combined": {
+        "fixes": [
+            "label_collision",
+            "seeded_split",
+            "merge_fallback",
+            "death_last_frame",
+            "drop_ghosts",
+            "marker_chain",
+        ],
+        "division_lookahead": 3,
+    },
+    "lc_seeded_orphan": {"fixes": ["label_collision", "seeded_split", "orphan_split"]},
+    "combined_orphan": {
+        "fixes": [
+            "label_collision",
+            "seeded_split",
+            "merge_fallback",
+            "orphan_split",
+            "death_last_frame",
+            "drop_ghosts",
+            "marker_chain",
+        ],
+        "division_lookahead": 3,
+    },
+    "combined_end": {
+        "fixes": [
+            "label_collision",
+            "seeded_split",
+            "merge_fallback",
+            "end_on_merge",
+            "death_last_frame",
+            "drop_ghosts",
+            "marker_chain",
+        ],
+        "division_lookahead": 3,
+    },
 }
 
 

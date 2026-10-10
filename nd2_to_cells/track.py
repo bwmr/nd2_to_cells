@@ -57,6 +57,7 @@ FIXES = {
     "f_gate": "1 -> 3+: the subset merge is off in the final pass",
     "marker_chain": "cell marker drops a lineage whose backward map breaks",
     "merge_fallback": "a 1 -> 2 merge that fails becomes a division, not orphans",
+    "orphan_split": "a cell without forward link inside a continued region: 2 -> 1",
 }
 
 

@@ -377,6 +377,29 @@ def _eq_any(a: list[int], b: list[int]) -> bool:
     raise RuntimeError("errorRez: MATLAB errors here (incompatible sizes)")
 
 
+def _orphans(c: Frame, r: Frame, min_area: float) -> dict[int, list[int]]:
+    """Previous cells with no forward link, by the c region holding them.
+
+    Not in MATLAB (the "orphan_split" fix). A cell of r at least min_area
+    large whose forward map is empty is assigned to the c region that covers
+    at least half of its pixels, if any.
+    """
+    out: dict[int, list[int]] = {}
+    for j in range(1, r.num_regs + 1):
+        if r.map_f[j] or r.area[j] < min_area:
+            continue
+        x0, y0, w, h = r.bbox[j]
+        ys = slice(int(y0), int(y0) + int(h))
+        xs = slice(int(x0), int(x0) + int(w))
+        hit = c.labels[ys, xs][r.labels[ys, xs] == j]
+        hit = hit[hit > 0]
+        if hit.size:
+            k = int(np.bincount(hit).argmax())
+            if np.count_nonzero(hit == k) >= 0.5 * r.area[j]:
+                out.setdefault(k, []).append(j)
+    return out
+
+
 AHEAD_MARGIN = 20  # px around the two pieces searched in look-ahead masks
 
 
@@ -474,12 +497,22 @@ def error_rez(
                 c, r, mother, s1, s2, cell_count, time, params.fixes
             )
 
+    orphans = (
+        _orphans(c, r, min_area_merge)
+        if "orphan_split" in params.fixes and r is not None and not ignore_error
+        else {}
+    )
+
     for k in range(1, c.num_regs + 1):
         if c.ID[k] != 0 or k in mod_regions:
             pass
         else:
             regs_r = c.map_r[k]  # rCellsFromC
             regs_f = c.map_f[k]  # fCellsFromC
+            if len(regs_r) == 1 and orphans.get(k):
+                # Not MATLAB: a previous cell without a forward link lies in
+                # k, so k holds two cells; handled as 2 -> 1 (E) below.
+                regs_r = regs_r + orphans[k]
             if regs_r:
                 # MATLAB quirk: x = c{[a b]} keeps the first element.
                 c_from_r = r.map_f[regs_r[0]]  # cCellsFromR
