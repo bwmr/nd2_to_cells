@@ -28,52 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import nd2_to_cells.mask_edit as mask_edit  # noqa: E402
 from nd2_to_cells import imreg  # noqa: E402
 
-
-def register_v4(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
-    import SimpleITK as sitk
-
-    moving = moving.astype(np.float64)
-    lo, hi = moving.min(), moving.max()
-    moving = np.zeros_like(moving) if lo == hi else (moving - lo) / (hi - lo)
-    h, w = fixed.shape
-    ys, xs = imreg._window((moving != 0) | (fixed != 0), imreg.MARGIN)
-    n_crop = (ys.stop - ys.start) * (xs.stop - xs.start)
-    mt = np.hypot(w, h)
-
-    def to_sitk(a):
-        im = sitk.GetImageFromArray(np.ascontiguousarray(a, dtype=np.float64))
-        im.SetOrigin((xs.start + 1.0, ys.start + 1.0))
-        return im
-
-    fixed_im = to_sitk(
-        imreg.imgaussfilt(fixed[ys, xs].astype(float), imreg.GAUSS_SIGMA)
-    )
-    moving_im = to_sitk(imreg.imgaussfilt(moving[ys, xs], imreg.GAUSS_SIGMA))
-    reg = sitk.ImageRegistrationMethod()
-    reg.SetMetricAsMeanSquares()
-    reg.SetMetricSamplingStrategy(reg.NONE)
-    reg.SetInterpolator(sitk.sitkLinear)
-    reg.SetOptimizerAsRegularStepGradientDescent(
-        learningRate=imreg.MAX_STEP,
-        minStep=imreg.MIN_STEP,
-        numberOfIterations=imreg.MAX_ITER,
-        relaxationFactor=imreg.RELAXATION,
-        gradientMagnitudeTolerance=imreg.GRAD_TOL * (h * w) / n_crop,
-        estimateLearningRate=reg.Never,
-    )
-    reg.SetOptimizerScales([1, 1, 1, 1, 1 / mt, 1 / mt])
-    reg.SetShrinkFactorsPerLevel([4, 2, 1])
-    reg.SetSmoothingSigmasPerLevel([2.0, 1.0, 0.5])
-    centre = sitk.AffineTransform(2)
-    centre.SetCenter(((w + 1) / 2, (h + 1) / 2))
-    reg.SetInitialTransform(centre, inPlace=False)
-    tform = reg.Execute(fixed_im, moving_im)
-    warped = sitk.Resample(
-        to_sitk(moving[ys, xs]), fixed_im, tform, sitk.sitkNearestNeighbor, 0.0
-    )
-    out = np.zeros_like(moving)
-    out[ys, xs] = sitk.GetArrayFromImage(warped)
-    return out
+register_v4 = imreg.register_masks_v4
 
 
 def run(d, register):

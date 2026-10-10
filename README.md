@@ -158,6 +158,13 @@ Linking parameters are set in the preset; they are SuperSegger's
 | `remove_stray` | `false` | `REMOVE_STRAY` | Delete regions with no backward and no forward map. |
 | `min_cell_age` | `3` | `MIN_CELL_AGE` | A complete cycle (`Cell{ID}.h5`) divides at least this many frames after its birth (GUI default 3). |
 
+Two further keys are experimental and leave SuperSegger's behaviour (off by
+default):
+- `fixes = [...]` lists opt-in fixes of MATLAB quirks. `nd2_to_cells.track.FIXES`
+  names them, and `docs/matlab_quirks.md` gives their effect.
+- `division_lookahead = k` merges a split instead of calling it a division if
+  its pieces fuse again within k frames. SuperSegger's value is 1.
+
 ## HDF5 cell file layout
 
 In the default mode each `cell{ID:07d}.h5` contains the datasets below at the

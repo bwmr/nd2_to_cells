@@ -65,31 +65,38 @@ Findings:
 ```bash
 pip install -e ".[dev]"
 pytest                                   # fast tests, a few seconds
-ND2C_TEST_DATA=".../amp_testing/01_SW5-20-1_2xMIC/260429" pytest   # + real data, ~7 min
+ND2C_TEST_DATA=".../amp_testing/01_SW5-20-1_2xMIC/260429" pytest   # + real data
 ```
+
+Every test that takes the `config` fixture runs once per configuration in
+`CONFIGS`. With real data, that costs about 7 min per configuration.
 
 | File | What it checks |
 |---|---|
 | `test_merge_events.py` | the event check itself, on hand-made tracks |
-| `test_scenarios.py` | synthetic movies: growth and division (controls), daughters that fuse (A), neighbours that fuse (B). The baseline passes all four. |
+| `test_fixes.py` | each opt-in fix against the MATLAB behaviour it replaces |
+| `test_scenarios.py` | synthetic movies: growth and division (controls), daughters that fuse (A), neighbours that fuse (B), and a temporary split that must not become a division (expected to fail without `division_lookahead` ≥ 3). The baseline passes the first four. |
 | `test_report_cases.py` | 10 real-data cases: one A and one B per position, plus the locations of the report's figures A and B. Each is linked as a 13–18-frame window that reproduces the full run's event. |
 
 In `test_report_cases.py`:
 - `test_baseline_event` pins the baseline: every case still produces its
   event.
-- `test_merge_resolved` states the desired outcome: the two cells are
-  separate tracks at t−1, and neither absorbs the other at t. Each
-  configuration is a strict xfail for every case it is not listed as
-  resolving in `RESOLVED`.
+- `test_merge_resolved` states the desired outcome: neither of the two cells
+  absorbs the other at t. One track holding both cells at t−1 also counts,
+  as long as that track absorbed no other track up to t; that is the outcome
+  when the split was never called a division. Each configuration is a strict
+  xfail for every case it is not listed as resolving in `RESOLVED`.
 
 The real-data tests read the masks in place and write only to pytest's
 temporary directory.
 
 ## Evaluating a change
 
-1. **Add the change as a configuration.** Put it in a preset (a key in
-   `TrackingParams`, or a preset file), then add an entry to `CONFIGS` in
-   `tests/conftest.py`. Every test that takes `config` now also runs on it.
+1. **Add the change as a configuration.** Make it switchable from the
+   preset: a name in `track.FIXES` for the `fixes` list, or a key in
+   `TrackingParams`. Then add an entry to `CONFIGS` in `tests/conftest.py`
+   with the preset values to change. Every test that takes `config` now also
+   runs on it.
 2. **Run `pytest`.** The controls must pass. For each case the change
    resolves, add its name to `RESOLVED[config]`. Strict xfail fails the run
    until you do, and also if a listed case fails again.

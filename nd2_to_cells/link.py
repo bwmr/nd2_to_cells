@@ -135,11 +135,19 @@ def link_frames(
     cell_count = 0
     data_r: Frame | None = None
     data_f: Frame | None = None
+    raw: dict[int, np.ndarray] = {}  # look-ahead masks by file index
     for t in range(1, n_frames + 1):
         data_c = data_f if data_f is not None else Frame(load_mask(t - 1))
         data_f = Frame(load_mask(t)) if t < n_frames else None
+        # Not SuperSegger: masks of files t+1 ... t+k-1 (frames t+2 ... t+k)
+        ahead = []
+        for i in range(t + 1, min(t + params.division_lookahead, n_frames)):
+            if i not in raw:
+                raw[i] = load_mask(i).astype(np.int32)
+            ahead.append(raw[i])
+        raw = {i: m for i, m in raw.items() if i > t}
         data_c, cell_count, _ = process_frame(
-            t, data_c, data_r, data_f, params, cell_count, warn
+            t, data_c, data_r, data_f, params, cell_count, warn, ahead
         )
         states.append(data_c)
         if data_r is not None:
@@ -160,31 +168,39 @@ def process_frame(
     params,
     cell_count: int,
     warn: Callable[[str], None] = print,
+    ahead: list[np.ndarray] | None = None,
 ) -> tuple[Frame, int, int]:
     """One frame of trackOptiLinkCellMulti: link, re-running after mask edits.
 
     ``data_r`` is mutated and keeps changes made by aborted passes, as in
-    MATLAB. Returns (final data_c, cell_count, number of passes).
+    MATLAB. ``ahead`` holds the masks after data_f, for the division
+    look-ahead. Returns (final data_c, cell_count, number of passes).
     """
+
+    def assign_(a, b, forward):
+        return assign(a, b, forward, params.da_min, params.da_max, params.fixes)
+
     cur_iter = 1
     while True:
         last_count = cell_count
         if data_r is not None:
-            data_r.set_assignment(
-                "f", assign(data_r, data_c, True, params.da_min, params.da_max)
-            )
-        data_c.set_assignment(
-            "r", assign(data_c, data_r, False, params.da_min, params.da_max)
-        )
-        data_c.set_assignment(
-            "f", assign(data_c, data_f, True, params.da_min, params.da_max)
-        )
+            data_r.set_assignment("f", assign_(data_r, data_c, True))
+        data_c.set_assignment("r", assign_(data_c, data_r, False))
+        data_c.set_assignment("f", assign_(data_c, data_f, True))
         final_iteration = cur_iter >= MAX_ITER_PER_FRAME
         no_edits = cur_iter >= SAFETY_MAX_PASSES
         if no_edits:
             warn(f"frame {t}: {cur_iter - 1} passes, finishing without mask edits")
         cell_count, reset = error_rez(
-            t, data_c, data_r, data_f, params, cell_count, final_iteration, no_edits
+            t,
+            data_c,
+            data_r,
+            data_f,
+            params,
+            cell_count,
+            final_iteration,
+            no_edits,
+            ahead or [],
         )
         if not reset:
             return data_c, cell_count, cur_iter
@@ -252,8 +268,11 @@ def mark_division_event(
     err: int,
     s2: int,
     cell_count: int,
+    fixes=(),
 ) -> int:
     if c.ID[s1]:  # MATLAB quirk: only sister 1 is checked
+        return cell_count
+    if "division_both_sisters" in fixes and c.ID[s2]:
         return cell_count
     cell_count += 1
     _new_daughter(c, s1, r, reg_r, time, err, sister_id=cell_count + 1, cid=cell_count)
@@ -279,7 +298,7 @@ def _new_daughter(c, s, r, reg_r, time, err, sister_id, cid) -> None:
     c.ID[s] = cid
 
 
-def create_division(c, r, mother, s1, s2, cell_count, time) -> int:
+def create_division(c, r, mother, s1, s2, cell_count, time, fixes=()) -> int:
     # The [L1,L2,Sc] suffix of MATLAB's label is not computed (cellprops3).
     c.label[s1] = (
         f"Frame: {time}, reg: {s1} and {s2} . cell division from mother reg{mother}"
@@ -287,7 +306,7 @@ def create_division(c, r, mother, s1, s2, cell_count, time) -> int:
     r.error_r[mother] = 0
     c.error_r[s1] = 0
     c.error_r[s2] = 0
-    return mark_division_event(c, s1, r, mother, time, 0, s2, cell_count)
+    return mark_division_event(c, s1, r, mother, time, 0, s2, cell_count, fixes)
 
 
 def map_to_best_of_two(c: Frame, k: int, r: Frame, map_cr: list[int], time: int):
@@ -358,6 +377,41 @@ def _eq_any(a: list[int], b: list[int]) -> bool:
     raise RuntimeError("errorRez: MATLAB errors here (incompatible sizes)")
 
 
+AHEAD_MARGIN = 20  # px around the two pieces searched in look-ahead masks
+
+
+def _fuse_ahead(c: Frame, s1: int, s2: int, f: Frame, ahead) -> bool:
+    """Do pieces s1 and s2 of c run into the same label in a look-ahead mask?
+
+    Not in MATLAB. Each piece is followed from its regions in f (c.map_f)
+    through the masks in ``ahead`` by largest overlap.
+    """
+    if not ahead or not c.map_f[s1] or not c.map_f[s2]:
+        return False
+    x0, y0 = np.minimum(c.bbox[s1, :2], c.bbox[s2, :2])
+    x1, y1 = np.maximum(
+        c.bbox[s1, :2] + c.bbox[s1, 2:], c.bbox[s2, :2] + c.bbox[s2, 2:]
+    )
+    h, w = f.labels.shape
+    ys = slice(max(int(y0) - AHEAD_MARGIN, 0), min(int(y1) + AHEAD_MARGIN, h))
+    xs = slice(max(int(x0) - AHEAD_MARGIN, 0), min(int(x1) + AHEAD_MARGIN, w))
+    box = f.labels[ys, xs]
+    m1, m2 = np.isin(box, c.map_f[s1]), np.isin(box, c.map_f[s2])
+    for labels in ahead:
+        box = labels[ys, xs]
+        nxt = []
+        for m in (m1, m2):
+            hit = box[m]
+            hit = hit[hit > 0]
+            if not hit.size:
+                return False
+            nxt.append(np.bincount(hit).argmax())
+        if nxt[0] == nxt[1]:
+            return True
+        m1, m2 = box == nxt[0], box == nxt[1]
+    return False
+
+
 def delete_regions(c: Frame, regs: list[int]) -> None:
     """deleteRegions: clear each label inside its (pass-start) bounding box."""
     for mm in regs:
@@ -378,11 +432,14 @@ def error_rez(
     cell_count: int,
     ignore_error: bool,
     no_edits: bool = False,
+    ahead: list[np.ndarray] = (),
 ) -> tuple[int, bool]:
     """Port of errorRez: resolve the maps into IDs; may edit c.labels.
 
     Returns (cell_count, reset). ``no_edits`` (safety cap, not in MATLAB)
-    also blocks the edits MATLAB doesn't gate by ignoreError.
+    also blocks the edits MATLAB doesn't gate by ignoreError. ``ahead``: masks
+    after f; a 1 -> 2 split whose pieces fuse again in one of them is merged
+    like one that fuses in f (division_lookahead, not in MATLAB).
     """
     ignore_error = ignore_error or no_edits
     remove_stray = params.remove_stray and not no_edits
@@ -398,7 +455,7 @@ def error_rez(
         nonlocal reset
         if no_edits:
             return
-        done = merge_regions(c, regs)
+        done = merge_regions(c, regs, params.fixes)
         if done:
             c.edited = True
         reset = reset or done
@@ -448,12 +505,14 @@ def error_rez(
                     good
                     and not ignore_error
                     and f is not None
-                    and (no_match or same or small)
+                    and (no_match or same or small or _fuse_ahead(c, s1, s2, f, ahead))
                 ):
                     merge([s1, s2])
                     mod_regions.update(c_transp)
                 elif good:
-                    cell_count = create_division(c, r, mother, s1, s2, cell_count, time)
+                    cell_count = create_division(
+                        c, r, mother, s1, s2, cell_count, time, params.fixes
+                    )
                     mod_regions.update(c_transp)
                 else:
                     cell_count, rst, mod = map_best_of_two(
@@ -494,12 +553,17 @@ def error_rez(
                         and all(x in c.map_f[s2] for x in c.map_f[s1])
                     )
                     small = c_area[s1] < min_area_merge or c_area[s2] < min_area_merge
-                    if good and not ignore_error and (no_match or same or small):
+                    refuse = f is not None and _fuse_ahead(c, s1, s2, f, ahead)
+                    if (
+                        good
+                        and not ignore_error
+                        and (no_match or same or small or refuse)
+                    ):
                         merge([s1, s2])
                         mod_regions.update(map_rc)
                     else:
                         cell_count = create_division(
-                            c, r, mother, s1, s2, cell_count, time
+                            c, r, mother, s1, s2, cell_count, time, params.fixes
                         )
                         mod_regions.update(map_rc)
                 elif (
@@ -522,7 +586,7 @@ def error_rez(
             elif len(regs_r) > 1:  # E: 2 -> 1, try to split
                 success = False
                 if not ignore_error:
-                    success = missing_seg_2to1(c, k, r, regs_r, f, regs_f)
+                    success = missing_seg_2to1(c, k, r, regs_r, f, regs_f, params.fixes)
                 if success:
                     c.edited = True
                     c.error_r[k] = 0
@@ -530,11 +594,18 @@ def error_rez(
                         f"Frame: {time}, reg: {k}. Segment added to fix 2 to 1 error"
                     )
                     reset = True
+                elif "end_on_merge" in params.fixes:
+                    # Not MATLAB: neither cell continues on the fused region.
+                    cell_count = create_new_cell(c, k, time, cell_count)
+                    c.error_r[k] = 1
+                    c.label[k] = f"Frame: {time}, reg: {k}. 2 to 1 not split: new cell"
                 else:
                     map_to_best_of_two(c, k, r, regs_r, time)
 
             elif len(regs_r) == 1 and len(c_from_r) > 2:  # F: 1 -> 3+
                 no_match = False  # MATLAB quirk: isempty of a cell array
+                if "f_no_match" in params.fixes:
+                    no_match = any(not c.map_f[m] for m in c_from_r)
                 forw = [x for m in c_from_r for x in c.map_f[m]]
                 forward_map = sorted(set(forw))
                 occur = [forw.count(v) for v in forward_map]
@@ -561,7 +632,8 @@ def error_rez(
                 elif f is not None and some_same:
                     value_fw = [v for v, o in zip(forward_map, occur) if o > 1]
                     to_merge = [m for m in c_from_r if _eq_any(c.map_f[m], value_fw)]
-                    merge(to_merge)  # MATLAB quirk: not gated by ignoreError
+                    if not (ignore_error and "f_gate" in params.fixes):
+                        merge(to_merge)  # MATLAB quirk: not gated by ignoreError
                     mod_regions.update(to_merge)
 
             else:  # G
@@ -581,8 +653,12 @@ def error_rez(
 # ---------------------------------------------------------------------------
 
 
-def cell_marker(states: list[Frame], min_cell_age: int) -> None:
-    """Mark complete cell cycles (stat0 = 2) by walking back from divisions."""
+def cell_marker(states: list[Frame], min_cell_age: int, fixes=()) -> None:
+    """Mark complete cell cycles (stat0 = 2) by walking back from divisions.
+
+    With the "marker_chain" fix (not MATLAB), a lineage whose backward map
+    breaks is dropped instead of continuing from a stale region.
+    """
     n_im = len(states)
     clist: list[list[int]] = []  # [ID, current region, birth]
     for i in range(n_im - 1, 1, -1):
@@ -602,6 +678,8 @@ def cell_marker(states: list[Frame], min_cell_age: int) -> None:
                 # MATLAB quirk: on an error (no backward map) the try/catch
                 # skips the update, so jj goes stale for the next frame.
                 if jj > c.num_regs or not c.map_r[jj]:
+                    if "marker_chain" in fixes:
+                        row[2] = n_im + 1  # never matches i >= row[2] again
                     continue
                 row[1] = c.map_r[jj][0]
                 c.stat0[jj] = 2

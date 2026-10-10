@@ -32,7 +32,13 @@ from nd2_to_cells.link import Frame, process_frame  # noqa: E402
 
 # Effective MATLAB settings of the reference run (GUI, 100XEc).
 PARAMS = SimpleNamespace(
-    da_min=-0.2, da_max=0.3, small_area_merge=50, remove_stray=False, min_cell_age=3
+    da_min=-0.2,
+    da_max=0.3,
+    small_area_merge=50,
+    remove_stray=False,
+    min_cell_age=3,
+    fixes=(),
+    division_lookahead=1,
 )
 C_FIELDS = ("ID", "birth", "birthF", "age", "ehist", "motherID", "sisterID")
 R_FIELDS = ("death", "deathF", "divide")

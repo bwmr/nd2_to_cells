@@ -7,8 +7,9 @@ split, or both tracks end).
 """
 
 import numpy as np
+import pytest
 
-from tests.conftest import link
+from tests.conftest import CONFIGS, link
 from tests.merge_events import find_events
 
 SHAPE = (160, 320)
@@ -86,3 +87,12 @@ def test_neighbours_fuse(tmp_path, config):
         frames.append([(left[0], right[1])] if t >= 5 else [left, right])
     tracks = link(tmp_path, movie(frames), config)
     assert [e for e in find_events(tracks) if e.kind == "B"] == []
+
+
+def test_temporary_split(tmp_path, config, request):
+    """Omnipose splits a cell for two frames: not a division (with look-ahead)."""
+    if CONFIGS[config].get("division_lookahead", 1) < 3:
+        mark = pytest.mark.xfail(strict=True, raises=AssertionError, reason="open")
+        request.applymarker(mark)
+    tracks = link(tmp_path, movie(dividing_cell(4, 6, fuse_at=6)), config)
+    assert [list(tr.frames) for tr in tracks.values()] == [list(range(10))]

@@ -6,9 +6,11 @@ the track holding point T absorbs the track holding point X. Both points are
 the window of frames start ... t+2 reproduces the full run's event.
 
 - test_baseline_event: the baseline still produces each event (snapshot).
-- test_merge_resolved: the desired outcome. The two cells are separate tracks
-  at t-1 and neither absorbs the other at t. Configurations are expected to
-  fail it (strict xfail) for every case not listed in RESOLVED.
+- test_merge_resolved: the desired outcome. Neither of the two cells absorbs
+  the other at t. Alternatively one track holds both at t-1 without having
+  absorbed another track (a split that was not called a division).
+  Configurations are expected to fail it (strict xfail) for every case not
+  listed in RESOLVED.
 
 Needs ND2C_TEST_DATA, the 260429 folder (read only). Takes about 7 min.
 """
@@ -53,7 +55,19 @@ CASES = {
 }
 
 # Cases each configuration is expected to resolve.
-RESOLVED: dict[str, set[str]] = {"baseline": set()}
+RESOLVED: dict[str, set[str]] = {
+    "baseline": set(),
+    "label_collision": {"report_fig_A"},
+    "area_penalty": set(),
+    "split_needs_two": set(),
+    "itk_v4": set(),
+    "lookahead3": set(),
+    "lookahead5": set(),
+    "seeded_split": set(),
+    "end_on_merge": set(),
+    "assign_bookkeeping": set(),
+    "errorrez_bookkeeping": set(),
+}
 
 _runs: dict[tuple[str, str], dict[int, Track]] = {}
 
@@ -107,9 +121,12 @@ def test_merge_resolved(name, config, tmp_path_factory, request):
     tracks = run_case(name, config, tmp_path_factory)
     t, x = pair(tracks, case)
     assert t is not None and x is not None, "a cell is not tracked at t-1"
-    assert t is not x, "the two cells are one track at t-1"
-    assert not [
-        e
-        for e in find_events(tracks)
-        if e.frame == case.t and {e.cell, e.absorbed} == {t.key, x.key}
-    ]
+    events = find_events(tracks)
+    if t is x:
+        assert not [e for e in events if e.cell == t.key and e.frame <= case.t]
+    else:
+        assert not [
+            e
+            for e in events
+            if e.frame == case.t and {e.cell, e.absorbed} == {t.key, x.key}
+        ]

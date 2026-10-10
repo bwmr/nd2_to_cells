@@ -1,9 +1,9 @@
 """Shared helpers: run `nd2_to_cells track` on a few label frames.
 
-Linker configurations under test are in CONFIGS: "baseline" is the
-bug-for-bug SuperSegger port. A change made for the linking report is added
-as a further entry (a preset name or .toml path), so every test that takes
-the `config` fixture runs on it too.
+Linker configurations under test are in CONFIGS: the 100XEc preset with some
+values replaced, such as a list of opt-in fixes (track.FIXES). "baseline" is
+the bug-for-bug SuperSegger port. Every test that takes the `config` fixture
+runs on all of them.
 """
 
 import os
@@ -23,7 +23,42 @@ if Path(nd2_to_cells.__file__).resolve().parents[1] != REPO:
         f"nd2_to_cells is imported from {nd2_to_cells.__file__}, not from {REPO}"
     )
 
-CONFIGS = {"baseline": "100XEc"}
+CONFIGS: dict[str, dict] = {
+    "baseline": {},
+    "label_collision": {"fixes": ["label_collision"]},
+    "area_penalty": {"fixes": ["area_penalty"]},
+    "split_needs_two": {"fixes": ["split_needs_two"]},
+    "itk_v4": {"fixes": ["itk_v4"]},
+    "lookahead3": {"division_lookahead": 3},
+    "lookahead5": {"division_lookahead": 5},
+    "seeded_split": {"fixes": ["seeded_split"]},
+    "end_on_merge": {"fixes": ["end_on_merge"]},
+    "assign_bookkeeping": {
+        "fixes": [
+            "assign_rev",
+            "assign_all_regions",
+            "assign_robbed_area",
+            "assign_exchange",
+            "assign_nan",
+        ]
+    },
+    "errorrez_bookkeeping": {
+        "fixes": ["division_both_sisters", "f_no_match", "f_gate"]
+    },
+}
+
+
+def preset_text(config: str) -> str:
+    """The 100XEc preset with the values of CONFIGS[config] appended."""
+    lines = [(REPO / "presets" / "100XEc.toml").read_text()]
+    for key, value in CONFIGS[config].items():
+        if isinstance(value, bool):
+            value = str(value).lower()
+        elif isinstance(value, list):
+            value = "[" + ", ".join(f'"{v}"' for v in value) + "]"
+        lines.append(f"{key} = {value}")
+    return "\n".join(lines) + "\n"
+
 
 # The 260429 experiment folder (with xy01 ... xy04), read-only.
 DATA = Path(os.environ["ND2C_TEST_DATA"]) if "ND2C_TEST_DATA" in os.environ else None
@@ -50,5 +85,7 @@ def link(
             dst.symlink_to(src)
         else:
             iio.imwrite(dst, src.astype(np.uint16))
-    run_track(str(out_dir), preset=CONFIGS[config])
+    preset = out_dir / "preset.toml"
+    preset.write_text(preset_text(config))
+    run_track(str(out_dir), preset=str(preset))
     return load_tracks(out_dir / "xy01" / "cell")

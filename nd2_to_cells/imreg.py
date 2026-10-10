@@ -52,6 +52,60 @@ def register_masks(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
     return warp(moving, params)
 
 
+def register_masks_v4(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
+    """register_masks with ITK v4 (SimpleITK) instead of MATLAB's v3 path.
+
+    Not SuperSegger: the "itk_v4" fix. Same pre-filter, metric, transform and
+    optimizer settings, without MATLAB's per-level step schedule; pyramid
+    smoothing sigmas 2, 1, 0.5. Runs on one thread, so results do not depend
+    on the machine. Needs SimpleITK (pip install SimpleITK).
+    """
+    import SimpleITK as sitk
+
+    sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(1)
+    moving = moving.astype(np.float64)
+    lo, hi = moving.min(), moving.max()
+    moving = np.zeros_like(moving) if lo == hi else (moving - lo) / (hi - lo)
+    h, w = fixed.shape
+    ys, xs = _window((moving != 0) | (fixed != 0), MARGIN)
+    n_crop = (ys.stop - ys.start) * (xs.stop - xs.start)
+    mt = math.hypot(w, h)
+
+    def to_sitk(a):
+        im = sitk.GetImageFromArray(np.ascontiguousarray(a, dtype=np.float64))
+        im.SetOrigin((xs.start + 1.0, ys.start + 1.0))
+        return im
+
+    fixed_im = to_sitk(imgaussfilt(fixed[ys, xs].astype(float), GAUSS_SIGMA))
+    moving_im = to_sitk(imgaussfilt(moving[ys, xs], GAUSS_SIGMA))
+    reg = sitk.ImageRegistrationMethod()
+    reg.SetMetricAsMeanSquares()
+    reg.SetMetricSamplingStrategy(reg.NONE)
+    reg.SetInterpolator(sitk.sitkLinear)
+    reg.SetOptimizerAsRegularStepGradientDescent(
+        learningRate=MAX_STEP,
+        minStep=MIN_STEP,
+        numberOfIterations=MAX_ITER,
+        relaxationFactor=RELAXATION,
+        # the metric is a mean over the window, not over the full frame
+        gradientMagnitudeTolerance=GRAD_TOL * (h * w) / n_crop,
+        estimateLearningRate=reg.Never,
+    )
+    reg.SetOptimizerScales([1, 1, 1, 1, 1 / mt, 1 / mt])
+    reg.SetShrinkFactorsPerLevel(list(PYRAMID))
+    reg.SetSmoothingSigmasPerLevel([2.0, 1.0, 0.5])
+    centre = sitk.AffineTransform(2)
+    centre.SetCenter(((w + 1) / 2, (h + 1) / 2))
+    reg.SetInitialTransform(centre, inPlace=False)
+    tform = reg.Execute(fixed_im, moving_im)
+    warped = sitk.Resample(
+        to_sitk(moving[ys, xs]), fixed_im, tform, sitk.sitkNearestNeighbor, 0.0
+    )
+    out = np.zeros_like(moving)
+    out[ys, xs] = sitk.GetArrayFromImage(warped)
+    return out
+
+
 def register(
     moving: np.ndarray, fixed: np.ndarray, max_iter: int = MAX_ITER, trace=None
 ):

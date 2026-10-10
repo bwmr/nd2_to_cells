@@ -10,19 +10,24 @@ import numpy as np
 from scipy import ndimage
 
 from nd2_to_cells.assign import label_colmajor
-from nd2_to_cells.imreg import register_masks
+from nd2_to_cells.imreg import register_masks, register_masks_v4
 
 _SQUARE3 = np.ones((3, 3), dtype=bool)
 
 
-def merge_regions(frame, list_merge: list[int]) -> bool:
+def merge_regions(frame, list_merge: list[int], fixes=()) -> bool:
     """merge2Regions: replace the regions by their closed union if connected.
 
     The union is closed with a 3x3 square; the merge happens only if the
     result is one 8-connected component. It is written as num_regs + 1 with
     ``rl + labels``. MATLAB quirks kept: only the first two regions are
     cleared, so pixels of other labels inside the closed union become label
-    sums, and num_regs is not refreshed between edits of one pass.
+    sums, and num_regs is not refreshed between edits of one pass. Two edits
+    in one pass can thus write the same label onto distant regions.
+
+    With the "label_collision" fix, all listed regions are cleared and the
+    union gets a label above every label in use; other cells keep their
+    pixels.
     """
     labels = frame.labels
     union = np.isin(labels, list_merge)
@@ -43,13 +48,21 @@ def merge_regions(frame, list_merge: list[int]) -> bool:
     if len(list_merge) < 2:
         raise RuntimeError("merge2Regions: MATLAB errors here (list_merge(2))")
     rl = labels
+    if "label_collision" in fixes:
+        new = rl.max() + 1
+        rl[union] = 0
+        box = rl[y0:y1, x0:x1]
+        box[(comp == 1) & (box == 0)] = new
+        return True
     rl[rl == list_merge[0]] = 0
     rl[rl == list_merge[1]] = 0
     rl[y0:y1, x0:x1] += (comp == 1).astype(rl.dtype) * (frame.num_regs + 1)
     return True
 
 
-def missing_seg_2to1(frame_c, reg_c, frame_r, regs_r, frame_f, regs_f) -> bool:
+def missing_seg_2to1(
+    frame_c, reg_c, frame_r, regs_r, frame_f, regs_f, fixes=()
+) -> bool:
     """missingSeg2to1: split a region that two previous cells collapsed into.
 
     The two previous cells (labelled 1 and 2) are registered onto the region;
@@ -57,16 +70,24 @@ def missing_seg_2to1(frame_c, reg_c, frame_r, regs_r, frame_f, regs_f) -> bool:
     too and the more consistent label pairing is used. The registered cells
     seed a watershed of the region. The region is replaced only if the result
     has maximum label 2 (MATLAB quirk: label 1 may be missing, in which case
-    the region is just relabelled). Returns True if the mask changed.
+    the region is just relabelled; with the "split_needs_two" fix that counts
+    as a failure). The "seeded_split" fix replaces registration and createMask
+    by _seeded_split. Returns True if the mask changed. The new
+    labels are num_regs + 1 and + 2, not refreshed within a pass (MATLAB
+    quirk); with the "label_collision" fix they lie above every label in use.
     """
+    register = register_masks_v4 if "itk_v4" in fixes else register_masks
     rl = frame_c.labels
     mask_c = (rl == reg_c).astype(np.float64)
+    if "seeded_split" in fixes:
+        new = _seeded_split(mask_c > 0, frame_r.labels, regs_r)
+        return new is not None and _write_split(frame_c, reg_c, new, fixes)
     mask_r = (frame_r.labels == regs_r[0]) + 2.0 * (frame_r.labels == regs_r[1])
-    reg_r = register_masks(mask_r, mask_c)
+    reg_r = register(mask_r, mask_c)
     if len(regs_r) == 2 and len(regs_f) == 2:
         rlf = frame_f.labels
         mask_f = (rlf == regs_f[0]) + 2.0 * (rlf == regs_f[1])
-        reg_rf = reg_r + 4 * register_masks(mask_f, mask_c)
+        reg_rf = reg_r + 4 * register(mask_f, mask_c)
         n1 = np.count_nonzero(reg_rf == 2.5) + np.count_nonzero(reg_rf == 5)
         n2 = np.count_nonzero(reg_rf == 3) + np.count_nonzero(reg_rf == 4.5)
         if n1 > n2:
@@ -79,7 +100,43 @@ def missing_seg_2to1(frame_c, reg_c, frame_r, regs_r, frame_f, regs_f) -> bool:
         new = _create_mask(mask_c, reg_r, 0.5, 1)
     if new.max() != 2:
         return False
-    max_reg = frame_c.num_regs
+    if "split_needs_two" in fixes and not (new == 1).any():
+        return False
+    return _write_split(frame_c, reg_c, new, fixes)
+
+
+def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | None:
+    """Split region with the previous frame's two cells as watershed seeds.
+
+    Not MATLAB (the "seeded_split" fix). The two cells are shifted together so
+    that their joint centroid lies on the region's; the parts inside the
+    region seed a watershed of its distance transform. Returns labels 1 and 2
+    on the region, or None if a seed is empty.
+    """
+    from skimage.segmentation import watershed
+
+    prev = np.isin(rl_r, regs_r[:2])
+    shift = np.round(
+        np.array(ndimage.center_of_mass(region)) - ndimage.center_of_mass(prev)
+    ).astype(int)
+    ys, xs = _window(region | prev, MASK_MARGIN + int(np.abs(shift).max()))
+    reg = region[ys, xs]
+    seeds = np.zeros(reg.shape, np.int32)
+    for i, k in enumerate(regs_r[:2], start=1):
+        cell = (rl_r[ys, xs] == k).astype(np.uint8)
+        seeds[(ndimage.shift(cell, shift, order=0) > 0) & reg] = i
+    if not ((seeds == 1).any() and (seeds == 2).any()):
+        return None
+    dist = ndimage.distance_transform_edt(reg)
+    out = np.zeros(region.shape, np.int32)
+    out[ys, xs] = watershed(-dist, seeds, mask=reg)
+    return out
+
+
+def _write_split(frame_c, reg_c: int, new: np.ndarray, fixes) -> bool:
+    """Replace region reg_c by the two pieces of ``new`` (labels 1 and 2)."""
+    rl = frame_c.labels
+    max_reg = int(rl.max()) if "label_collision" in fixes else frame_c.num_regs
     out = np.where(new == 1, max_reg + 1, np.where(new == 2, max_reg + 2, 0))
     changed = rl.copy()
     changed[changed == reg_c] = 0
