@@ -12,14 +12,18 @@ The headline numbers are summed over xy01–xy04, 361 frames each.
 
 | Configuration | Merges (A + B + far) | Absorbed cells that end | Area jumps > 1.3× | Tracks clean ≥ 60 frames | Cases resolved | Peak memory |
 |---|---|---|---|---|---|---|
-| baseline (SuperSegger) | 3900 | 3526 | 5.63 % | 209 | 0 / 10 | up to ~10 GB |
-| `main`'s IoU linker (19fc751) | 2107 | 2016 | 5.02 % | 188 | 1 / 10 | small |
+| baseline (SuperSegger) | 3900 | 3526 | 5.63 % | 209 | 0 / 10 | ~7 GB¹ |
+| `main`'s IoU linker (19fc751) | 2107 | 2016 | 5.02 % | 188 | 1 / 10 | — |
 | `label_collision` | 3063 | 2963 | 4.99 % | 215 | 1 / 10 | — |
 | `lc_seeded_split` | 1328 | 1185 | 3.00 % | **377** | 9 / 10 | 1.3 GB |
 | `combined` | 1272 | 1121 | 3.02 % | 356 | 9 / 10 | 2.1 GB |
 | `combined_end` | 1192 | 1052 | **2.98 %** | 359 | 9 / 10 | 2.1 GB |
 | `lc_seeded_orphan` | 892 | 616 | 3.13 % | 373 | 9 / 10 | 1.7 GB |
 | `combined_orphan` | **844** | **561** | 3.15 % | 346 | 9 / 10 | 2.6 GB |
+
+¹ Measured on the assignment and errorRez group runs, which give the
+baseline's counts. Runs with more mask edits and the label-collision quirk
+reach 10 GB.
 
 - `lc_` means on top of `label_collision`.
 - `combined` is `label_collision`, `seeded_split`, `merge_fallback` and `division_lookahead = 3`, plus the output fixes `death_last_frame`, `drop_ghosts` and `marker_chain`.
@@ -30,8 +34,8 @@ Findings:
 
 1. **`label_collision` (#1) is the first fix to make.** It removes the "far"
    events (1242 → 3), where one track picks up a cell about 1000 px away and
-   jumps there. Peak memory drops from up to 10 GB per position to about
-   1 GB: the writer kept full-frame-sized crops for those tracks. It also
+   jumps there. Peak memory drops from 7–10 GB per position to 1–2 GB: the
+   writer kept full-frame-sized crops for those tracks. It also
    stops every other mask-editing fix from adding new far events, so the
    other fixes are best judged on top of it.
 2. **The split decides A and B (#12, #18).** MATLAB's affine registration
