@@ -82,10 +82,11 @@ In `test_report_cases.py`:
 - `test_baseline_event` pins the baseline: every case still produces its
   event.
 - `test_merge_resolved` states the desired outcome: neither of the two cells
-  absorbs the other at t. One track holding both cells at t−1 also counts,
-  as long as that track absorbed no other track up to t; that is the outcome
-  when the split was never called a division. Each configuration is a strict
-  xfail for every case it is not listed as resolving in `RESOLVED`.
+  absorbs a track, or is absorbed, at t. One track holding both cells at t−1
+  also counts, as long as that track absorbed no other track up to t; that
+  is the outcome when the split was never called a division. Each
+  configuration is a strict xfail for every case it is not listed as
+  resolving in `RESOLVED`.
 
 The real-data tests read the masks in place and write only to pytest's
 temporary directory.

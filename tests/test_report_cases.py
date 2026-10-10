@@ -7,8 +7,8 @@ the window of frames start ... t+2 reproduces the full run's event.
 
 - test_baseline_event: the baseline still produces each event (snapshot).
 - test_merge_resolved: the desired outcome. Neither of the two cells absorbs
-  the other at t. Alternatively one track holds both at t-1 without having
-  absorbed another track (a split that was not called a division).
+  a track, or is absorbed, at t. Alternatively one track holds both at t-1
+  without having absorbed another track (a split not called a division).
   Configurations are expected to fail it (strict xfail) for every case not
   listed in RESOLVED.
 
@@ -131,8 +131,7 @@ def test_merge_resolved(name, config, tmp_path_factory, request):
     if t is x:
         assert not [e for e in events if e.cell == t.key and e.frame <= case.t]
     else:
+        pair_keys = {t.key, x.key}
         assert not [
-            e
-            for e in events
-            if e.frame == case.t and {e.cell, e.absorbed} == {t.key, x.key}
+            e for e in events if e.frame == case.t and pair_keys & {e.cell, e.absorbed}
         ]

@@ -92,3 +92,18 @@ def test_drop_ghosts():
     states[1].death[1:4] = 2
     assert sorted(_build_tracks(states, [0, 1, 2])) == [1, 2, 3]
     assert sorted(_build_tracks(states, [0, 1, 2], ("drop_ghosts",))) == [1, 3]
+
+
+def test_seeded_split_three_cells():
+    """Three previous cells fused into one region: three pieces, not two."""
+    from nd2_to_cells.mask_edit import missing_seg_2to1
+
+    r = np.zeros((20, 70), np.int32)
+    r[5:15, 2:20], r[5:15, 24:44], r[5:15, 48:68] = 1, 2, 3
+    c = np.zeros_like(r)
+    c[5:15, 2:68] = 1
+    frame_c = Frame(c.copy())
+    assert missing_seg_2to1(
+        frame_c, 1, Frame(r), [1, 2, 3], None, [], ("seeded_split",)
+    )
+    assert sorted(set(np.unique(frame_c.labels)) - {0}) == [2, 3, 4]

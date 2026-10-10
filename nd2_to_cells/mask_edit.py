@@ -81,7 +81,9 @@ def missing_seg_2to1(
     mask_c = (rl == reg_c).astype(np.float64)
     if "seeded_split" in fixes:
         new = _seeded_split(mask_c > 0, frame_r.labels, regs_r)
-        return new is not None and _write_split(frame_c, reg_c, new, fixes)
+        return new is not None and _write_split(
+            frame_c, reg_c, new, fixes, int(new.max())
+        )
     mask_r = (frame_r.labels == regs_r[0]) + 2.0 * (frame_r.labels == regs_r[1])
     reg_r = register(mask_r, mask_c)
     if len(regs_r) == 2 and len(regs_f) == 2:
@@ -106,26 +108,31 @@ def missing_seg_2to1(
 
 
 def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | None:
-    """Split region with the previous frame's two cells as watershed seeds.
+    """Split region with the previous frame's cells as watershed seeds.
 
-    Not MATLAB (the "seeded_split" fix). The two cells are shifted together so
-    that their joint centroid lies on the region's; the parts inside the
-    region seed a watershed of its distance transform. Returns labels 1 and 2
-    on the region, or None if a seed is empty.
+    Not MATLAB (the "seeded_split" fix). All previous cells mapped to the
+    region (MATLAB uses the first two) are shifted together so that their
+    joint centroid lies on the region's; the parts inside the region seed a
+    watershed of its distance transform. Returns labels 1 ... n on the region
+    (one per non-empty seed), or None if fewer than two seeds are left.
     """
     from skimage.segmentation import watershed
 
-    prev = np.isin(rl_r, regs_r[:2])
+    prev = np.isin(rl_r, regs_r)
     shift = np.round(
         np.array(ndimage.center_of_mass(region)) - ndimage.center_of_mass(prev)
     ).astype(int)
     ys, xs = _window(region | prev, MASK_MARGIN + int(np.abs(shift).max()))
     reg = region[ys, xs]
     seeds = np.zeros(reg.shape, np.int32)
-    for i, k in enumerate(regs_r[:2], start=1):
+    n = 0
+    for k in regs_r:
         cell = (rl_r[ys, xs] == k).astype(np.uint8)
-        seeds[(ndimage.shift(cell, shift, order=0) > 0) & reg] = i
-    if not ((seeds == 1).any() and (seeds == 2).any()):
+        seed = (ndimage.shift(cell, shift, order=0) > 0) & reg & (seeds == 0)
+        if seed.any():
+            n += 1
+            seeds[seed] = n
+    if n < 2:
         return None
     dist = ndimage.distance_transform_edt(reg)
     out = np.zeros(region.shape, np.int32)
@@ -133,11 +140,11 @@ def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | 
     return out
 
 
-def _write_split(frame_c, reg_c: int, new: np.ndarray, fixes) -> bool:
-    """Replace region reg_c by the two pieces of ``new`` (labels 1 and 2)."""
+def _write_split(frame_c, reg_c: int, new: np.ndarray, fixes, n: int = 2) -> bool:
+    """Replace region reg_c by the pieces of ``new`` (labels 1 ... n)."""
     rl = frame_c.labels
     max_reg = int(rl.max()) if "label_collision" in fixes else frame_c.num_regs
-    out = np.where(new == 1, max_reg + 1, np.where(new == 2, max_reg + 2, 0))
+    out = np.where(np.isin(new, np.arange(1, n + 1)), max_reg + new, 0)
     changed = rl.copy()
     changed[changed == reg_c] = 0
     changed += out.astype(changed.dtype)
