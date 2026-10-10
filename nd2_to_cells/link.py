@@ -451,14 +451,28 @@ def error_rez(
     c.ID[:] = 0
     mod_regions: set[int] = set()
 
-    def merge(regs):
+    def merge(regs) -> bool:
         nonlocal reset
         if no_edits:
-            return
+            return False
         done = merge_regions(c, regs, params.fixes)
         if done:
             c.edited = True
         reset = reset or done
+        return done
+
+    def merge_or_divide(s1, s2, mother, matlab_merge) -> None:
+        """Merge a 1 -> 2 split. MATLAB quirk: if the merge fails (the closed
+        union is not connected), both pieces become new cells without a
+        mother. Not MATLAB: they divide instead with the "merge_fallback" fix,
+        and always when only the look-ahead asked for the merge."""
+        nonlocal cell_count
+        if merge([s1, s2]):
+            return
+        if not matlab_merge or "merge_fallback" in params.fixes:
+            cell_count = create_division(
+                c, r, mother, s1, s2, cell_count, time, params.fixes
+            )
 
     for k in range(1, c.num_regs + 1):
         if c.ID[k] != 0 or k in mod_regions:
@@ -501,13 +515,14 @@ def error_rez(
                 no_match = not c.map_f[s1] or not c.map_f[s2]
                 same = not no_match and all(x in c.map_f[s2] for x in c.map_f[s1])
                 small = c_area[s1] < min_area_merge or c_area[s2] < min_area_merge
+                matlab_merge = no_match or same or small
                 if (
                     good
                     and not ignore_error
                     and f is not None
-                    and (no_match or same or small or _fuse_ahead(c, s1, s2, f, ahead))
+                    and (matlab_merge or _fuse_ahead(c, s1, s2, f, ahead))
                 ):
-                    merge([s1, s2])
+                    merge_or_divide(s1, s2, mother, matlab_merge)
                     mod_regions.update(c_transp)
                 elif good:
                     cell_count = create_division(
@@ -553,13 +568,10 @@ def error_rez(
                         and all(x in c.map_f[s2] for x in c.map_f[s1])
                     )
                     small = c_area[s1] < min_area_merge or c_area[s2] < min_area_merge
+                    matlab_merge = no_match or same or small
                     refuse = f is not None and _fuse_ahead(c, s1, s2, f, ahead)
-                    if (
-                        good
-                        and not ignore_error
-                        and (no_match or same or small or refuse)
-                    ):
-                        merge([s1, s2])
+                    if good and not ignore_error and (matlab_merge or refuse):
+                        merge_or_divide(s1, s2, mother, matlab_merge)
                         mod_regions.update(map_rc)
                     else:
                         cell_count = create_division(

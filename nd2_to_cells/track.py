@@ -56,6 +56,7 @@ FIXES = {
     "f_no_match": "1 -> 3+: pieces without a forward map count as no match",
     "f_gate": "1 -> 3+: the subset merge is off in the final pass",
     "marker_chain": "cell marker drops a lineage whose backward map breaks",
+    "merge_fallback": "a 1 -> 2 merge that fails becomes a division, not orphans",
 }
 
 

@@ -45,6 +45,14 @@ CONFIGS: dict[str, dict] = {
     "errorrez_bookkeeping": {
         "fixes": ["division_both_sisters", "f_no_match", "f_gate"]
     },
+    "merge_fallback": {"fixes": ["merge_fallback"]},
+    # On top of label_collision, which removes the far events that every
+    # extra mask edit otherwise adds through label collisions:
+    "lc_itk_v4": {"fixes": ["label_collision", "itk_v4"]},
+    "lc_seeded_split": {"fixes": ["label_collision", "seeded_split"]},
+    "lc_merge_fallback": {"fixes": ["label_collision", "merge_fallback"]},
+    "lc_lookahead3": {"fixes": ["label_collision"], "division_lookahead": 3},
+    "lc_lookahead5": {"fixes": ["label_collision"], "division_lookahead": 5},
 }
 
 

@@ -39,7 +39,9 @@ def growing(length: float, n: int, rate: float = 0.02) -> list[float]:
     return [length * (1 + rate) ** t for t in range(n)]
 
 
-def dividing_cell(n_before: int, n_after: int, fuse_at: int | None = None):
+def dividing_cell(
+    n_before: int, n_after: int, fuse_at: int | None = None, gap: float = 2
+):
     """A cell that grows, divides after n_before frames; daughters may fuse."""
     frames = []
     centre = SHAPE[1] / 2
@@ -48,7 +50,10 @@ def dividing_cell(n_before: int, n_after: int, fuse_at: int | None = None):
             frames.append([(centre - length / 2, centre + length / 2)])
         else:
             frames.append(
-                [(centre - length / 2, centre - 1), (centre + 1, centre + length / 2)]
+                [
+                    (centre - length / 2, centre - gap / 2),
+                    (centre + gap / 2, centre + length / 2),
+                ]
             )
     return frames
 
@@ -96,3 +101,15 @@ def test_temporary_split(tmp_path, config, request):
         request.applymarker(mark)
     tracks = link(tmp_path, movie(dividing_cell(4, 6, fuse_at=6)), config)
     assert [list(tr.frames) for tr in tracks.values()] == [list(range(10))]
+
+
+def test_unmergeable_split_keeps_mother(tmp_path, config):
+    """A split too wide to merge back: the pieces must not lose their mother.
+
+    MATLAB merges a temporary split only if the closed union is connected;
+    a failed merge must not leave two motherless cells (look-ahead).
+    """
+    frames = movie(dividing_cell(4, 6, fuse_at=6, gap=5))
+    tracks = link(tmp_path, frames, config)
+    born = [tr for tr in tracks.values() if tr.frames[0] == 4]
+    assert born and all(tr.mother for tr in born)

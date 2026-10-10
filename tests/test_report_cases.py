@@ -67,6 +67,12 @@ RESOLVED: dict[str, set[str]] = {
     "end_on_merge": set(),
     "assign_bookkeeping": set(),
     "errorrez_bookkeeping": set(),
+    "merge_fallback": set(),
+    "lc_itk_v4": set(),
+    "lc_seeded_split": set(),
+    "lc_merge_fallback": set(),
+    "lc_lookahead3": set(),
+    "lc_lookahead5": set(),
 }
 
 _runs: dict[tuple[str, str], dict[int, Track]] = {}
