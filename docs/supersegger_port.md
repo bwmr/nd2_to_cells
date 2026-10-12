@@ -123,9 +123,10 @@ It uses the same optimizer settings, without MATLAB's per-level step schedule.
 
 The quality proxy is the mean IoU of the two new pieces with the two cells of
 the previous frame, unregistered. It is a proxy, not ground truth. Pieces are
-counted inside the fused region only: in two calls, an earlier edit of the
-same pass had already written label `num_regs + 1` elsewhere (the
-label-collision quirk), which a frame-wide count mistakes for a piece.
+counted inside the fused region only. In 15 of the 93 calls, an earlier edit
+of the same pass had already written label `num_regs + 1` or `+ 2` elsewhere
+in the frame (the label-collision quirk). A frame-wide count mistook that for
+a piece in two calls, and lowered the IoU in others.
 
 | | success | real two-piece splits | IoU with previous cells | median time per call |
 |---|---|---|---|---|
