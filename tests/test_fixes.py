@@ -107,3 +107,24 @@ def test_seeded_split_three_cells():
         frame_c, 1, Frame(r), [1, 2, 3], None, [], ("seeded_split",)
     )
     assert sorted(set(np.unique(frame_c.labels)) - {0}) == [2, 3, 4]
+
+
+def test_rigid_split_follows_a_rotation():
+    """Two cells end to end, fused and rotated by 8 degrees at t."""
+    from scipy import ndimage
+
+    from nd2_to_cells.mask_edit import _rigid_onto, missing_seg_2to1
+
+    r = np.zeros((80, 140), np.int32)
+    r[34:46, 20:68], r[34:46, 72:120] = 1, 2
+    fused = ndimage.rotate((r > 0).astype(np.uint8), 8, reshape=False, order=0)
+    fused = ndimage.binary_closing(fused > 0, np.ones((7, 7)))
+    shifted = ndimage.shift(r, (2, 3), order=0)  # translation only
+    moved = _rigid_onto(shifted, fused)
+    assert np.count_nonzero((moved > 0) & fused) > 1.1 * np.count_nonzero(
+        (r > 0) & fused
+    )
+    frame_c = Frame(fused.astype(np.int32))
+    assert missing_seg_2to1(frame_c, 1, Frame(r), [1, 2], None, [], ("rigid_split",))
+    a, b = (np.count_nonzero(frame_c.labels == k) for k in (2, 3))
+    assert 0.8 < a / b < 1.25

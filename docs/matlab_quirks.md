@@ -119,7 +119,7 @@ Questions for discussion:
 
 | # | Quirk | Likely effect | Fix | Status |
 |---|---|---|---|---|
-| 12 | 2→1 (two cells map to one region): if the split fails, the cheaper cell continues on the fused region and the other ends without a flag (`mapToBestOfTwo`). | This is the A and B mechanism itself. Options: a better split (ITK v4 registration, #18), a seeded split, or end both tracks with a flag. | `seeded_split`, `end_on_merge` (with `itk_v4`, #18) | tested |
+| 12 | 2→1 (two cells map to one region): if the split fails, the cheaper cell continues on the fused region and the other ends without a flag (`mapToBestOfTwo`). | This is the A and B mechanism itself. Options: a better split (ITK v4 registration, #18), a seeded split, or end both tracks with a flag. | `seeded_split`, `rigid_split` (seeded split after a rotation search), `end_on_merge` (with `itk_v4`, #18) | tested |
 | 13 | 1→2 is called a division or an over-segmentation from one frame of look-ahead only (do both pieces map to the same region at t+1?). | A split that lasts two or more frames becomes a division, and its later re-fusion becomes an A event. A few frames of look-ahead could tell real divisions from temporary splits. | `division_lookahead = k` (preset key; 1 in SuperSegger). If the merge fails, the division is called (see #22). | tested with k = 3, 5 |
 | 14 | `markDivisionEvent` checks only whether sister 1 already has an ID. | Sister 2's ID can be overwritten. | `division_both_sisters` | tested in `errorrez_bookkeeping` |
 | 15 | `x = c{[a b]}` keeps the first element (`cCellsFromR`, `cCellsTransp`, and the 1→2 sister map). | Only the first of two previous cells is examined. | — | no effect: the first element is only read where the list has one element |

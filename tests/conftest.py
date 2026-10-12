@@ -75,6 +75,37 @@ CONFIGS: dict[str, dict] = {
         ],
         "division_lookahead": 3,
     },
+    # Final-run candidates (2026-10-12): combined_orphan with the fixes for
+    # #4, #7, #8, #9 and #16; and with a rigid instead of a translated split.
+    "combined_orphan_plus": {
+        "fixes": [
+            "label_collision",
+            "seeded_split",
+            "merge_fallback",
+            "orphan_split",
+            "area_penalty",
+            "assign_robbed_area",
+            "assign_exchange",
+            "assign_nan",
+            "f_no_match",
+            "death_last_frame",
+            "drop_ghosts",
+            "marker_chain",
+        ],
+        "division_lookahead": 3,
+    },
+    "combined_orphan_rigid": {
+        "fixes": [
+            "label_collision",
+            "rigid_split",
+            "merge_fallback",
+            "orphan_split",
+            "death_last_frame",
+            "drop_ghosts",
+            "marker_chain",
+        ],
+        "division_lookahead": 3,
+    },
     "combined_end": {
         "fixes": [
             "label_collision",

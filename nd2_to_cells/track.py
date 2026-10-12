@@ -46,6 +46,7 @@ FIXES = {
     "drop_ghosts": "labels without pixels are not written as cells",
     "itk_v4": "split registration with ITK v4 (SimpleITK), not MATLAB's v3 path",
     "seeded_split": "split a fused region with the previous cells as seeds",
+    "rigid_split": "seeded_split with the cells rotated (rigid alignment) first",
     "end_on_merge": "a fused region that is not split becomes a new cell",
     "assign_rev": "fixProblems also updates the reverse map",
     "assign_all_regions": "fixProblems uses all regions an f region maps to",

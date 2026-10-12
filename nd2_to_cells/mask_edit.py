@@ -79,8 +79,9 @@ def missing_seg_2to1(
     register = register_masks_v4 if "itk_v4" in fixes else register_masks
     rl = frame_c.labels
     mask_c = (rl == reg_c).astype(np.float64)
-    if "seeded_split" in fixes:
-        new = _seeded_split(mask_c > 0, frame_r.labels, regs_r)
+    if "seeded_split" in fixes or "rigid_split" in fixes:
+        rotate = "rigid_split" in fixes
+        new = _seeded_split(mask_c > 0, frame_r.labels, regs_r, rotate)
         return new is not None and _write_split(
             frame_c, reg_c, new, fixes, int(new.max())
         )
@@ -107,7 +108,12 @@ def missing_seg_2to1(
     return _write_split(frame_c, reg_c, new, fixes)
 
 
-def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | None:
+RIGID_ANGLES = (0, -2, 2, -4, 4, -6, 6, -8, 8, -10, 10)  # degrees, "rigid_split"
+
+
+def _seeded_split(
+    region: np.ndarray, rl_r: np.ndarray, regs_r, rotate: bool = False
+) -> np.ndarray | None:
     """Split region with the previous frame's cells as watershed seeds.
 
     Not MATLAB (the "seeded_split" fix). All previous cells mapped to the
@@ -115,6 +121,10 @@ def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | 
     joint centroid lies on the region's; the parts inside the region seed a
     watershed of its distance transform. Returns labels 1 ... n on the region
     (one per non-empty seed), or None if fewer than two seeds are left.
+
+    With ``rotate`` (the "rigid_split" fix) the cells are also rotated about
+    their joint centroid, by the angle in RIGID_ANGLES at which they overlap
+    the region most: a rigid alignment, cheaper than affine registration.
     """
     from skimage.segmentation import watershed
 
@@ -122,13 +132,22 @@ def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | 
     shift = np.round(
         np.array(ndimage.center_of_mass(region)) - ndimage.center_of_mass(prev)
     ).astype(int)
-    ys, xs = _window(region | prev, MASK_MARGIN + int(np.abs(shift).max()))
+    margin = MASK_MARGIN + int(np.abs(shift).max())
+    if rotate:  # room for the ends of the rotated cells
+        extent = int(np.ptp(np.nonzero(prev), axis=1).max()) + 1
+        margin += int(np.ceil(extent * np.sin(np.deg2rad(max(RIGID_ANGLES)))))
+    ys, xs = _window(region | prev, margin)
     reg = region[ys, xs]
+    if rotate:
+        moved = _rigid_onto(np.where(prev[ys, xs], rl_r[ys, xs], 0), reg)
     seeds = np.zeros(reg.shape, np.int32)
     n = 0
     for k in regs_r:
-        cell = (rl_r[ys, xs] == k).astype(np.uint8)
-        seed = (ndimage.shift(cell, shift, order=0) > 0) & reg & (seeds == 0)
+        if rotate:
+            seed = (moved == k) & reg & (seeds == 0)
+        else:
+            cell = (rl_r[ys, xs] == k).astype(np.uint8)
+            seed = (ndimage.shift(cell, shift, order=0) > 0) & reg & (seeds == 0)
         if seed.any():
             n += 1
             seeds[seed] = n
@@ -138,6 +157,29 @@ def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | 
     out = np.zeros(region.shape, np.int32)
     out[ys, xs] = watershed(-dist, seeds, mask=reg)
     return out
+
+
+def _rigid_onto(labels: np.ndarray, region: np.ndarray) -> np.ndarray:
+    """Move ``labels`` onto ``region``: centroid onto centroid, best rotation.
+
+    The rotation about the labels' joint centroid is chosen from RIGID_ANGLES
+    by the overlap of the moved labels with the region; ties keep the smaller
+    angle. Nearest-neighbour resampling keeps the labels.
+    """
+    c_in = np.array(ndimage.center_of_mass(labels > 0))
+    c_out = np.array(ndimage.center_of_mass(region))
+    best, best_overlap = None, -1
+    for angle in RIGID_ANGLES:
+        t = np.deg2rad(angle)
+        rot = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+        # output pixel o reads input pixel rot @ (o - c_out) + c_in
+        moved = ndimage.affine_transform(
+            labels, rot, offset=c_in - rot @ c_out, order=0
+        )
+        overlap = np.count_nonzero((moved > 0) & region)
+        if overlap > best_overlap:
+            best, best_overlap = moved, overlap
+    return best
 
 
 def _write_split(frame_c, reg_c: int, new: np.ndarray, fixes, n: int = 2) -> bool:
