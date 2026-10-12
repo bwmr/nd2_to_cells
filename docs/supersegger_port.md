@@ -122,17 +122,20 @@ unchanged. Per call, the port takes a median of 0.8 s (maximum 5 s). MATLAB on
 It uses the same optimizer settings, without MATLAB's per-level step schedule.
 
 The quality proxy is the mean IoU of the two new pieces with the two cells of
-the previous frame, unregistered. It is a proxy, not ground truth.
+the previous frame, unregistered. It is a proxy, not ground truth. Pieces are
+counted inside the fused region only: in two calls, an earlier edit of the
+same pass had already written label `num_regs + 1` elsewhere (the
+label-collision quirk), which a frame-wide count mistakes for a piece.
 
 | | success | real two-piece splits | IoU with previous cells | median time per call |
 |---|---|---|---|---|
-| Port (v3 path) | 52 | 23 | 0.60 | 0.8 s |
-| MATLAB, 1 thread | 54 | 24 | 0.59 | 37 s |
-| SimpleITK v4 | 60 | 60 | 0.80 | 0.6 s |
+| Port (v3 path) | 52 | 21 | 0.68 | 0.8 s |
+| MATLAB, 1 thread | 54 | 22 | 0.68 | 37 s |
+| SimpleITK v4 | 60 | 60 | 0.85 | 0.6 s |
 
 The MATLAB path counts a call as successful whenever the result has at most
 two labels. More than half of those successes only relabel the region and do
-not cut it: 29 of 52 for the port, 30 of 54 for MATLAB. With the v4
+not cut it: 31 of 52 for the port, 32 of 54 for MATLAB. With the v4
 registration, every success is a real split, 60 of 93 calls.
 
 v4 agrees with the v3 path on success in only 57 of 93 calls, so adopting it

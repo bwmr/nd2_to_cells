@@ -62,7 +62,7 @@ Findings:
 - **Clean cases work.** On clean synthetic rods, the port splits fused labels
   correctly, so the real-data failures come from the split step (registration
   and watershed). Over 93 split calls, the MATLAB-faithful registration cut
-  the region in 23, and ITK v4 in 60 (see `supersegger_port.md`).
+  the region in 21, and ITK v4 in 60 (see `supersegger_port.md`).
 
 ## Tests
 

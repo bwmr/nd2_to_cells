@@ -54,9 +54,15 @@ def iou(a, b):
 
 
 def quality(d, rl):
-    """Mean IoU of the two pieces with the r cells (and f cells if two)."""
+    """Mean IoU of the two pieces with the r cells (and f cells if two).
+
+    The pieces are looked for inside the fused region only: an earlier edit
+    in the same pass may already have written label n + 1 elsewhere (MATLAB's
+    label-collision quirk).
+    """
     n = int(d["num_regs"])
-    pieces = [rl == n + 1, rl == n + 2]
+    region = d["rl"] == int(d["regC"])
+    pieces = [(rl == n + 1) & region, (rl == n + 2) & region]
     if not (pieces[0].any() and pieces[1].any()):
         return None, None
     out = []

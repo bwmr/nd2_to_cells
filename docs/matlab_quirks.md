@@ -99,7 +99,7 @@ Questions for discussion:
 | # | Quirk | Likely effect | Fix | Status |
 |---|---|---|---|---|
 | 1 | Merges and splits label their result `num_regs + 1` (and `+ 2`), and `num_regs` is not refreshed within a pass. A merge also adds its label onto any third cell inside the closed union (label sums). Two edits in one pass can therefore give distant regions the same label. | "far" events: one track picks up a distant cell and then jumps there. 1242 baseline events on 260429. | `label_collision` | tested |
-| 2 | A split counts as a success when the result's largest label is 2, even if label 1 is missing. The region is then only relabelled, and the frame is re-run. | Wasted passes (29 of 52 split "successes" on xy01), ending in best-of-two anyway. Runtime, and possibly label order. | `split_needs_two` | tested |
+| 2 | A split counts as a success when the result's largest label is 2, even if label 1 is missing. The region is then only relabelled, and the frame is re-run. | Wasted passes (31 of 52 split "successes" on xy01), ending in best-of-two anyway. Runtime, and possibly label order. | `split_needs_two` | tested |
 | 3 | `watershedpaw` mixes up the x and y bounds when clipping the 3×3 neighbourhood. | Small changes to split geometry near the window edge. | — | negligible: only for ridge pixels on the image border (the watershed window keeps a 16 px margin) |
 
 ## Assignment (`assign.py`)
@@ -125,14 +125,14 @@ Questions for discussion:
 | 15 | `x = c{[a b]}` keeps the first element (`cCellsFromR`, `cCellsTransp`, and the 1→2 sister map). | Only the first of two previous cells is examined. | — | no effect: the first element is only read where the list has one element |
 | 16 | 1→3+: `isempty` of a cell array is always false, so "no forward match" never triggers the merge. | That branch is dead. | `f_no_match` | tested in `errorrez_bookkeeping` |
 | 17 | 1→3+: the subset merge is not gated by `ignoreError`. | A frame can loop forever; the port's safety cap stops it. | `f_gate` | tested in `errorrez_bookkeeping` |
-| 22 | 1→2 merge of a temporary split fails when the closed union is not connected (gap of 2 px or more). Both pieces then become new cells without a mother, and the mother ends without daughters. | Broken lineages after splits; when the pieces later fuse, the merge is a B event. Look-ahead makes many more merge requests and hits this often. | `merge_fallback` | tested |
+| 22 | 1→2 merge of a temporary split fails when the closed union is not connected: the 3×3 closing bridges gaps of up to 2 px, so pieces 3 px or more apart cannot be merged. Both pieces then become new cells without a mother, and the mother ends without daughters. | Broken lineages after splits; when the pieces later fuse, the merge is a B event. Look-ahead makes many more merge requests and hits this often. | `merge_fallback` | tested |
 | 23 | 2→1 hidden by the assignment: when a small cell fuses with a large one, the fused region is linked back to the large cell only. The small cell gets no forward link, the area change stays within `da_max`, and errorRez continues the large cell as if nothing happened. | Most of the B events left after the split fixes (finding 5). | `orphan_split` | tested |
 
 ## Cell marker and output (`link.py`, `track.py`)
 
 | # | Quirk | Likely effect | Fix | Status |
 |---|---|---|---|---|
-| 18 | Registration for splits follows MATLAB's ITK v3 path (not a quirk, an upgrade path). | ITK v4 cut 60 of 93 split calls against 23 (`supersegger_port.md`). Expected to reduce A and B. | `itk_v4` | tested |
+| 18 | Registration for splits follows MATLAB's ITK v3 path (not a quirk, an upgrade path). | ITK v4 cut 60 of 93 split calls against 21 (`supersegger_port.md`). Expected to reduce A and B. | `itk_v4` | tested |
 | 19 | CellMarker: a failed backward lookup leaves `jj` stale for the next frame. | Wrong `Cell`/`cell` naming on some lineages. | `marker_chain` | implemented; output only |
 | 20 | `death` comes from the cell's last frame, where it can be stale (last frame + 1). | Wrong `death` in the HDF5 file. Downstream reads `death`. | `death_last_frame` | implemented; output only |
 | 21 | Labels without pixels (ghosts) become cells with empty masks. | About half of all cell files on 260429 are ghosts, each with its own ID. | `drop_ghosts` | implemented; output only |
