@@ -20,6 +20,8 @@ The headline numbers are summed over xy01–xy04, 361 frames each.
 | `combined_end` | 1192 | 1052 | **2.98 %** | 359 | 9 / 10 | 2.1 GB |
 | `lc_seeded_orphan` | 892 | 616 | 3.13 % | 373 | 9 / 10 | 1.7 GB |
 | `combined_orphan` | **844** | **561** | 3.15 % | 346 | 9 / 10 | 2.6 GB |
+| `combined_orphan_plus` | 845 | 580 | 3.16 % | 346 | 8 / 10 | 1.2 GB |
+| `combined_orphan_rigid` | 856 | 581 | 3.13 % | 342 | **10 / 10** | 2.5 GB |
 
 ¹ Measured on the assignment and errorRez group runs, which give the
 baseline's counts. Runs with more mask edits and the label-collision quirk
@@ -29,6 +31,9 @@ reach 10 GB.
 - `combined` is `label_collision`, `seeded_split`, `merge_fallback` and `division_lookahead = 3`, plus the output fixes `death_last_frame`, `drop_ghosts` and `marker_chain`.
 - `combined_end` adds `end_on_merge`, and `combined_orphan` adds
   `orphan_split`.
+- `combined_orphan_plus` adds the fixes for #4, #7, #8, #9 and #16 to
+  `combined_orphan`. `combined_orphan_rigid` replaces `seeded_split` with
+  `rigid_split`. Both were tested in the final run (below).
 
 Findings:
 
@@ -75,9 +80,11 @@ Findings:
    - `merge_fallback` (#22) alone. It keeps the number of merges
      identical, but turns orphaned pieces back into sisters (B → A), so it
      fixes lineages.
-7. **Speed.** On xy01 alone, `combined` takes 671 s of CPU against 1804 s
-   for the baseline: fewer frame re-runs, and no registration. `main`'s IoU
-   linker takes about 20 s per position.
+7. **Speed.** Timed alone on xy01 (final run), `combined_orphan` takes
+   677 s against 852 s for the baseline: fewer frame re-runs, and no
+   registration. `main`'s IoU linker takes 16 s. The earlier CPU figures
+   (671 s for `combined` against 1804 s) came from overlapping runs and
+   overstated the gap.
 
 Questions for discussion:
 - Which fixes become the default, and does a SuperSegger-faithful preset stay
@@ -93,6 +100,75 @@ Questions for discussion:
   by bridging transient jumps?
 - The writer's memory (crop buffers for all tracks until the end) is only a
   problem with far tracks. Is it worth changing anyway?
+- `seeded_split` or `rigid_split`? They are equal in aggregate; `rigid_split`
+  also resolves the last report case and takes 6 % longer.
+
+## Final test run (2026-10-12)
+
+Code at 331042d, all four positions of 260429. The tracking runs, the timing
+runs and the case outcomes ran first, then the parity scripts and the
+downstream runs.
+
+Checks:
+- **Baseline regression.** On all four positions, the baseline's cell
+  files are identical to those of the 2026-10-08 run, every file and every
+  dataset.
+- **Parity scripts.**
+  - `parity_assign.py`: no failures on any of the four positions, and the
+    cost agrees within 2.3e-10.
+  - `parity_link.py`, xy01: every line is identical to the earlier log,
+    timings aside. 256 of 361 frames are identical (`supersegger_port.md`).
+- **Determinism.** `combined_orphan` is identical to its 2026-10-10 run.
+  Each timing run is identical to the full run of its configuration.
+
+Timing: xy01, one configuration at a time, nothing else running.
+
+| Configuration | Wall | CPU (user + sys) | Peak memory |
+|---|---|---|---|
+| baseline | 852 s | 851 s | 3.3 GB |
+| `combined_orphan` | 677 s | 676 s | 0.9 GB |
+| `combined_orphan_rigid` | 718 s | 717 s | 0.9 GB |
+| `main`'s IoU linker | 16 s | 16 s | 0.4 GB |
+
+Peak memory is the process's maximum resident set, and it varies between
+runs with identical output. On xy01, `combined_orphan` peaked at 0.9 GB here,
+and at 2.5 GB in the full run, which ran beside seven others. In the full
+runs, the baseline peaked at 3.1–7.5 GB per position and `combined_orphan` at
+0.8–2.5 GB.
+
+The two extra configurations (counts in the tables above):
+- **`combined_orphan_plus`** (fixes for #4, #7, #8, #9, #16). In aggregate,
+  nothing changes, as with the separate runs (finding 6). It loses report
+  case xy01_B: one track already holds both cells at t−1, and it has
+  absorbed another track by frame t.
+- **`combined_orphan_rigid`** (`rigid_split`). Equal in aggregate. It is the
+  first configuration to resolve all ten report cases: xy03_B was merged in
+  every earlier one.
+
+Downstream: `amp_testing/01_preprocessing_curation.py`, up to the export of
+the curated table. It ran on a scratch copy, with the images linked
+read-only and the cell files of each configuration.
+- **Counting.** A lineage is a root-to-leaf path, so sister lineages share
+  their ancestors' rows. When curation cuts them before the division, they
+  become copies of each other, so the table counts distinct row sets.
+- **Workaround.** Since `timelapse_analysis` 441e5d4, the script's overview
+  plot fails on several positions: positions are concatenated with duplicate
+  index labels, and seaborn cannot plot those once growth rates hold NaN.
+  The copy resets the index after import, which does not change the
+  curation.
+
+| Configuration | Curated lineages | … beyond 150 min | Curated cells | Curated cell-frames | … beyond 150 min |
+|---|---|---|---|---|---|
+| baseline | 111 | 49 | 181 | 8,148 | 2,464 |
+| `main`'s IoU linker | 108 | 24 | 152 | 5,566 | 776 |
+| `combined_orphan` | **168** | **137** | **312** | **22,940** | **12,263** |
+
+Against the baseline, `combined_orphan` keeps 2.8× the curated cell-frames,
+and against `main`, 4.1×. Beyond 150 min the factors are 5.0× and 16×, with
+137 lineages against 49 and 24. The merge fixes thus do pay off downstream.
+Long clean tracks (346 against 209 for the baseline and 188 for `main`) had
+already shown this, even though they barely differ between the
+`combined_*` variants.
 
 ## Mask edits (`mask_edit.py`)
 
@@ -166,13 +242,15 @@ tracks that stay clean for at least an hour.
 | `combined_end` | 180 | 1010 | 2 | 1052 | 2.98 % | 5618 | 73,742 | 359 | 9 | 2.1 |
 | `lc_seeded_orphan` | 203 | 685 | 4 | 616 | 3.13 % | 5446 | 76,236 | 373 | 9 | 1.7 |
 | `combined_orphan` | 157 | 683 | 4 | 561 | 3.15 % | 5091 | 71,501 | 346 | 9 | 2.6 |
+| `combined_orphan_plus` | 146 | 697 | 2 | 580 | 3.16 % | 5123 | 71,748 | 346 | 8 | 1.2 |
+| `combined_orphan_rigid` | 155 | 697 | 4 | 581 | 3.13 % | 5171 | 72,416 | 342 | 10 | 2.5 |
 
 Notes:
 - **Peak memory** could only be measured from Python, so it is missing for
   the first runs. Configurations with the label-collision quirk need 6–10 GB
   per position, against 1–2 GB without it.
 - **Wall-clock times** are not comparable: the runs overlapped, and the
-  machine slept during some of them. Use the CPU times in finding 7.
+  machine slept during some of them. Use the final run's timing.
 - **Superseded runs.** The first `seeded_split` and look-ahead runs used
   earlier versions: two seeds only, and look-ahead without the division
   fallback. They were re-run, and only the re-runs are listed.

@@ -174,5 +174,6 @@ whole-run variation of MATLAB against itself is not measured.
 On xy01, `timelapse_analysis.check_cell_ok` keeps 940 of the port's cells and
 951 of SuperSegger's. The HDF5 schema is unchanged.
 
-Runtime: 32 min for xy01 run alone. Run three at a time, while MATLAB was
-also running, positions took 46–65 min.
+Runtime: 14 min (852 s) for xy01 run alone, with nothing else running
+(2026-10-12; an earlier measurement gave 32 min). Run three at a time, while
+MATLAB was also running, positions took 46–65 min.

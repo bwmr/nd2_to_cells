@@ -93,8 +93,8 @@ RESOLVED: dict[str, set[str]] = {
     "combined_end": NINE,
     "lc_seeded_orphan": NINE,
     "combined_orphan": NINE,
-    "combined_orphan_plus": set(),
-    "combined_orphan_rigid": set(),
+    "combined_orphan_plus": NINE - {"xy01_B"},
+    "combined_orphan_rigid": set(CASES),
 }
 
 _runs: dict[tuple[str, str], dict[int, Track]] = {}
