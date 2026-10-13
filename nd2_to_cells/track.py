@@ -368,16 +368,24 @@ def _flush_track_to_h5(
 
 
 def _track_position(
-    xy_dir: Path, params: TrackingParams, pad: int, consolidated: bool = False
-) -> None:
-    """Run the full tracking pipeline for one xy position."""
+    xy_dir: Path,
+    params: TrackingParams,
+    pad: int,
+    consolidated: bool = False,
+    frame_bar: bool = False,
+) -> int | None:
+    """Run the full tracking pipeline for one xy position.
+
+    Returns the number of tracks written, or None if the position is skipped.
+    ``frame_bar`` shows a progress bar over the frames (single-process runs).
+    """
     masks_dir = xy_dir / "masks"
     cell_dir = xy_dir / "cell"
     cell_dir.mkdir(exist_ok=True)
 
     if not masks_dir.exists():
-        print(f"  [skip] {xy_dir.name}: no masks/ directory")
-        return
+        tqdm.write(f"  [skip] {xy_dir.name}: no masks/ directory")
+        return None
 
     # Remove the cp_output directory Omnipose creates as a CLI artefact
     cp_output_dir = xy_dir / "cp_output"
@@ -389,19 +397,19 @@ def _track_position(
     try:
         mask_paths = _enumerate_mask_paths(masks_dir)
     except FileNotFoundError as e:
-        print(f"  [skip] {xy_dir.name}: {e}")
-        return
+        tqdm.write(f"  [skip] {xy_dir.name}: {e}")
+        return None
 
     if not mask_paths:
-        print(f"  [skip] {xy_dir.name}: empty masks/ directory")
-        return
+        tqdm.write(f"  [skip] {xy_dir.name}: empty masks/ directory")
+        return None
 
     # Missing frames are bridged by the linker; warn since links are less reliable
     frames = {f for f, _ in mask_paths}
     missing = [f + 1 for f in range(min(frames), max(frames)) if f not in frames]
     if missing:
         shown = ", ".join(map(str, missing[:10])) + (" …" if len(missing) > 10 else "")
-        print(
+        tqdm.write(
             f"  [warn] {xy_dir.name}: {len(missing)} frame(s) missing from masks/ "
             f"(t = {shown}); tracks are linked across the gap(s)"
         )
@@ -411,7 +419,7 @@ def _track_position(
     if phase_tifs and max(f.stat().st_mtime for f in phase_tifs) > min(
         p.stat().st_mtime for _, p in mask_paths
     ):
-        print(
+        tqdm.write(
             f"  [warn] {xy_dir.name}: phase/ images are newer than masks/ — "
             "masks may be out of date (re-run Omnipose?)"
         )
@@ -419,21 +427,22 @@ def _track_position(
     # Image shape from first frame only
     img_shape = _load_mask(mask_paths[0][1]).shape[:2]
 
-    def progress(t: int) -> None:
-        if t % 50 == 0:
-            print(f"  {xy_dir.name}: linked {t}/{len(mask_paths)} frames", flush=True)
-
-    print(f"  {xy_dir.name}: linking {len(mask_paths)} frames...")
-    states = link_frames(
-        lambda i: _load_mask(mask_paths[i][1]),
-        len(mask_paths),
-        params,
-        warn=lambda msg: print(f"  [warn] {xy_dir.name}: {msg}"),
-        progress=progress,
-    )
+    with tqdm(
+        total=len(mask_paths),
+        desc=f"  {xy_dir.name}",
+        unit="frame",
+        leave=False,
+        disable=not frame_bar,
+    ) as bar:
+        states = link_frames(
+            lambda i: _load_mask(mask_paths[i][1]),
+            len(mask_paths),
+            params,
+            warn=lambda msg: tqdm.write(f"  [warn] {xy_dir.name}: {msg}"),
+            progress=lambda t: bar.update(),
+        )
     cell_marker(states, params.min_cycle_frames)
     tracks = _build_tracks(states, [f for f, _ in mask_paths])
-    print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 file(s)...")
 
     buffers = _alloc_track_buffers(tracks, img_shape, pad)
     _fill_buffers(mask_paths, tracks, buffers, states)
@@ -446,8 +455,6 @@ def _track_position(
     ]
     for f in stale:
         f.unlink()
-    if stale:
-        print(f"  {xy_dir.name}: removed {len(stale)} previous cell file(s)")
 
     if consolidated:
         _flush_all_tracks_to_h5(cell_dir, tracks, buffers)
@@ -455,21 +462,23 @@ def _track_position(
         for track in tracks.values():
             if track.track_id in buffers:
                 _flush_track_to_h5(cell_dir, track, buffers[track.track_id])
+    return len(tracks)
 
 
-def _track_position_wrapper(args) -> str | None:
-    """Run one position; return an error message instead of raising."""
-    xy_dir, preset_str, pad, consolidated = args
+def _track_position_wrapper(args) -> tuple[str, int | None, str | None]:
+    """Run one position; return (name, number of tracks, error message)."""
+    xy_dir, preset_str, pad, consolidated, frame_bar = args
+    name = Path(xy_dir).name
     try:
         params = load_preset(preset_str)
-        _track_position(Path(xy_dir), params, pad, consolidated)
+        n_tracks = _track_position(Path(xy_dir), params, pad, consolidated, frame_bar)
     except Exception as exc:
         import traceback
 
         print(f"ERROR tracking {xy_dir}: {exc}")
         traceback.print_exc()
-        return f"{Path(xy_dir).name}: {exc}"
-    return None
+        return name, None, f"{name}: {exc}"
+    return name, n_tracks, None
 
 
 # ---------------------------------------------------------------------------
@@ -513,10 +522,11 @@ def run_track(
         f"division_lookahead={params.division_lookahead})"
     )
 
-    args = [(str(d), preset, pad, consolidated) for d in xy_dirs]
+    # One worker: also a bar over the frames of the current position.
+    args = [(str(d), preset, pad, consolidated, workers <= 1) for d in xy_dirs]
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            errors = list(
+            results = list(
                 tqdm(
                     pool.map(_track_position_wrapper, args),
                     total=len(args),
@@ -525,9 +535,15 @@ def run_track(
                 )
             )
     else:
-        errors = [_track_position_wrapper(a) for a in args]
+        results = [
+            _track_position_wrapper(a)
+            for a in tqdm(args, desc="Tracking positions", unit="pos")
+        ]
 
-    failed = [e for e in errors if e]
+    for name, n_tracks, _ in results:
+        if n_tracks is not None:
+            print(f"  {name}: {n_tracks} tracks")
+    failed = [e for _, _, e in results if e]
     if failed:
         raise RuntimeError(
             f"Tracking failed for {len(failed)}/{len(args)} position(s):\n  "

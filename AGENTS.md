@@ -102,7 +102,7 @@ Details, the evidence for each change and the tests are in `docs/linking.md`.
   - Edited masks are kept compressed in memory. No `masksOS/` is written.
   - Labels without pixels (ghosts) get no cell file, and `death` is the cell's last frame.
   - `birth`/`death` are frame numbers rather than file indices; the two only differ when a mask frame is missing.
-  - Progress is printed every 50 frames, because a 361-frame position takes 10–35 min.
+  - Progress is a tqdm bar over positions, as in `align`; with one worker, a nested bar over the frames, as in `export`, because a 361-frame position takes 10–35 min. Besides warnings, only the number of tracks per position is printed, after all positions finish.
 
 ## Behavioral guidelines
 

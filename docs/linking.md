@@ -8,12 +8,9 @@ covers:
 - how it was checked against SuperSegger;
 - the results on 260429, and the tests.
 
-Background:
-- [`supersegger_linking_reference.md`](supersegger_linking_reference.md)
-  describes SuperSegger's linking (source: `omnisegger/SuperSegger-master` at
-  `254d081`).
-- [`linking_comparison.md`](linking_comparison.md) compares it with the IoU
-  linker that this code replaced.
+Background: [`supersegger_linking_reference.md`](supersegger_linking_reference.md)
+describes SuperSegger's linking (source: `omnisegger/SuperSegger-master` at
+`254d081`).
 
 ## What is ported
 
