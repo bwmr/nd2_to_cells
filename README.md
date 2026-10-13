@@ -133,12 +133,14 @@ per-slice TIFFs produced by `export --export-z-slices` and writes one
 replaced; `masks/` is never modified. A warning is printed if `phase/` images
 are newer than the masks.
 
-The linking is a bug-for-bug port of SuperSegger/OmniSegger's `trackOpti`
-(linking with mask merges and splits, complete-cycle marking, cell files),
-limited to what determines lineages; fluorescence statistics, cell geometry,
-foci and `clist` are not computed. Merges and splits are applied to the masks
-written into the HDF5 crops. See `docs/supersegger_port.md` for what is ported,
-the deliberate differences and the parity checks against MATLAB output.
+The linking follows SuperSegger/OmniSegger's `trackOpti` (linking with mask
+merges and splits, complete-cycle marking, cell files), limited to what
+determines lineages; fluorescence statistics, cell geometry, foci and `clist`
+are not computed. Seven changes reduce cells that merge with their sister or
+a neighbour: on the 260429 test data, A + B merges drop from 2658 to 852,
+against 2104 for the IoU linker this code replaced. Merges and splits are
+applied to the masks written into the HDF5 crops. See `docs/linking.md` for
+what is ported, what changes and why, and the tests.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -148,22 +150,23 @@ the deliberate differences and the parity checks against MATLAB output.
 | `--consolidated` | off | Write one `cells.h5` per position (one group per cell) instead of one file per cell. |
 | `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
 
-Linking parameters are set in the preset; they are SuperSegger's
-`CONST.trackOpti` values as a `superSeggerGui` run uses them:
+Linking parameters are set in the preset. Except for `division_lookahead`,
+they are SuperSegger's `CONST.trackOpti` values as a `superSeggerGui` run
+uses them:
 
 | Preset key | 100XEc | SuperSegger | Description |
 |------------|--------|-------------|-------------|
 | `da_min`, `da_max` | `-0.2`, `0.3` | `DA_MIN`, `DA_MAX` | Normalised area-change limits: outside them a link is flagged as an error, and divisions and merges need a change inside them. |
-| `small_area_merge` | `50` (Pa: `30`) | `SMALL_AREA_MERGE` | Two regions mapping back to one cell are merged if either is smaller than this (pixels), among other conditions. |
-| `remove_stray` | `false` | `REMOVE_STRAY` | Delete regions with no backward and no forward map. |
-| `min_cell_age` | `3` | `MIN_CELL_AGE` | A complete cycle (`Cell{ID}.h5`) divides at least this many frames after its birth (GUI default 3). |
+| `fragment_merge_area` | `50` (Pa: `30`) | `SMALL_AREA_MERGE` | The two pieces of a split are merged back if either is smaller than this (pixels), among other conditions. A previous cell at least this large that disappears into a neighbour is split off again. |
+| `drop_single_frame_strays` | `false` | `REMOVE_STRAY` | Delete regions with no predecessor and no successor. |
+| `min_cycle_frames` | `4` | `MIN_CELL_AGE` + 1 | A complete cycle (`Cell{ID}.h5`) spans at least this many frames, birth and division frame included (GUI default 3 + 1). |
+| `division_lookahead` | `3` | — (1) | A split whose pieces fuse again within this many frames is merged back instead of called a division. |
 
-Two further keys are experimental and leave SuperSegger's behaviour (off by
-default):
-- `fixes = [...]` lists opt-in fixes of MATLAB quirks. `nd2_to_cells.track.FIXES`
-  names them, and `docs/matlab_quirks.md` gives their effect.
-- `division_lookahead = k` merges a split instead of calling it a division if
-  its pieces fuse again within k frames. SuperSegger's value is 1.
+Presets that use the earlier key names still load, with a warning naming the
+new key: `small_area_merge` → `fragment_merge_area`, `remove_stray` →
+`drop_single_frame_strays`, `min_cell_age` → `min_cycle_frames`. Values carry
+over unchanged. Unknown keys, such as those of the IoU linker, are ignored
+with a warning.
 
 ## HDF5 cell file layout
 
@@ -177,7 +180,7 @@ Each cell contains:
 | Dataset    | Type        | Shape    | Description                                |
 |------------|-------------|----------|--------------------------------------------|
 | `birth`    | int64       | scalar   | 1-based frame of birth (first appearance)  |
-| `death`    | int64       | scalar   | 1-based frame of death (last frame; SuperSegger can leave it one frame later) |
+| `death`    | int64       | scalar   | 1-based frame of death (last frame)        |
 | `divide`   | int8        | scalar   | 1 if the cell divides in its last frame    |
 | `motherID` | int64       | scalar   | Track ID of mother cell (0 = none)         |
 | `sisterID` | int64       | scalar   | Track ID of sister cell (0 = none)         |
@@ -200,6 +203,6 @@ Tracking parameters are stored in `presets/` as TOML files. Available presets:
 
 Values are the effective SuperSegger settings of a `superSeggerGui` run with
 the corresponding `.mat` preset (some `.mat` values, e.g. `REMOVE_STRAY` in
-100XEc, are never used by SuperSegger).
+100XEc, are never used by SuperSegger), plus `division_lookahead`.
 Pass a preset name (`--preset 100XEc`, looked up in `presets/`) or a path to
 your own `.toml` (`--preset /path/to/custom.toml`).

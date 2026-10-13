@@ -12,19 +12,17 @@ nd2_to_cells/      # Python package
   export.py        # run_export(): ND2 → per-position TIFFs
   align.py         # run_align(): phase-cross-correlation drift correction
   assemble.py      # run_assemble(): Z-slice TIFFs → per-timepoint ZYX stacks (alternative to align)
-  track.py         # run_track(): SuperSegger linking port → cell*.h5 files
+  track.py         # run_track(): SuperSegger-derived linking → cell*.h5 files
   link.py          #   driver, errorRez, cell marker (trackOptiLinkCellMulti etc.)
   assign.py        #   frame-to-frame assignment (multiAssignmentSparse)
   mask_edit.py     #   merges and splits (merge2Regions, missingSeg2to1)
-  imreg.py         #   affine mask registration (MATLAB imregtform / ITK v3 path)
-dev/               # parity scripts against SuperSegger output (not packaged)
 tests/             # pytest: merge events (linking report issues A and B)
 presets/
   100XEc.toml      # E. coli defaults (default preset)
   100XPa.toml      # P. aeruginosa defaults
 ```
 
-No CI. No Makefile. `dev/` holds parity scripts that compare `track` with SuperSegger output (see `docs/supersegger_port.md`). `tests/` holds pytest tests for the merge issues of the 260429 linking report (see `docs/linking_report_tests.md`).
+No CI. No Makefile. `tests/` holds pytest tests for the merge issues of the 260429 linking report (see `docs/linking.md`).
 
 ## Install
 
@@ -38,19 +36,19 @@ Requires Python ≥ 3.11 (uses stdlib `tomllib`).
 ## Lint and format (only dev tools)
 
 ```bash
-ruff check nd2_to_cells/ tests/ dev/   # E, F, I rules; line-length=88
-ruff format nd2_to_cells/ tests/ dev/
+ruff check nd2_to_cells/ tests/   # E, F, I rules; line-length=88
+ruff format nd2_to_cells/ tests/
 ```
 
 ## Tests
 
 ```bash
 pytest                                          # fast tests (seconds)
-ND2C_TEST_DATA=<260429 folder> pytest -k "baseline or combined"   # + real data, ~7 min per config
+ND2C_TEST_DATA=<260429 folder> pytest   # + real data, ~4 min
 ```
 
 - The tests import `nd2_to_cells` from this checkout (`pythonpath` in `pyproject.toml`), and `tests/conftest.py` refuses to run against another copy, such as an editable install of the main checkout.
-- A linking change made for the report is added as a configuration in `CONFIGS` (`tests/conftest.py`). The cases it resolves are listed in `RESOLVED` (`tests/test_report_cases.py`). The baseline must keep passing `test_baseline_event`.
+- A linking change must keep all 10 real-data cases of `tests/test_report_cases.py` resolved. Count merge events on whole positions with `python tests/merge_events.py <cell dir> ...` and compare with `docs/linking.md`.
 
 ## Pipeline commands (must run in order)
 
@@ -79,33 +77,30 @@ Z-stack data: `export --export-z-slices` → `assemble` (instead of `align`). No
 
 ## Architecture notes
 
-- **Memory design**: `align.py` holds at most 2 frames; `assemble.py` holds one timepoint's Z-stack. `track.py` holds 3 label frames (previous, current, next) while linking, plus scalar region tables for all frames and compressed copies of edited masks; the writing step keeps crop buffers for all tracks until the end, so memory grows with movie length × cell count. With the label-collision quirk (the baseline), some tracks span distant cells and their crops approach the full frame: about 7 GB per position on 260429 (up to 10 GB with more mask edits), against 1–2 GB with the `label_collision` fix. Do not load full stacks.
-- **Linking port**: `link.py`/`assign.py`/`mask_edit.py`/`imreg.py` reproduce SuperSegger bug-for-bug (MATLAB quirks are kept and marked "MATLAB quirk"). Labels are 1-based: per-region arrays have an unused index 0. Check changes with the `dev/` parity scripts.
+- **Memory design**: `align.py` holds at most 2 frames; `assemble.py` holds one timepoint's Z-stack. `track.py` holds 5 label frames while linking (previous, current, next, and `division_lookahead` − 1 = 2 look-ahead frames), plus scalar region tables for all frames and compressed copies of edited masks; the writing step keeps crop buffers for all tracks until the end, so memory grows with movie length × cell count. On 260429 that is 1–2.5 GB per position. A track that jumps between distant cells has a crop close to the full frame: SuperSegger's label collision, which `mask_edit.py` avoids, took this to 7–10 GB. Do not load full stacks.
+- **Linking**: `link.py`/`assign.py`/`mask_edit.py` follow SuperSegger, with seven changes marked "Not SuperSegger"; SuperSegger behaviour kept although it looks wrong is marked "MATLAB quirk". Labels are 1-based: per-region arrays have an unused index 0.
 - **Parallelism**: `ProcessPoolExecutor` per xy position. Worker entry points are module-level picklable wrappers (`_align_position_wrapper`, `_assemble_position_wrapper`, `_track_position_wrapper`).
 - **Preset resolution**: `load_preset()` first tries the argument as a path; if not found, looks in `presets/{name}.toml`. Custom presets can be passed as a file path.
-- **Cell naming**: `cell{ID:07d}.h5` (lowercase) = partial observation; `Cell{ID:07d}.h5` (uppercase) = complete cell cycle (SuperSegger stat0 = 2: born from a division, divides, no linking error, divides ≥ `min_cell_age` frames after birth).
+- **Cell naming**: `cell{ID:07d}.h5` (lowercase) = partial observation; `Cell{ID:07d}.h5` (uppercase) = complete cell cycle (SuperSegger stat0 = 2: born from a division, divides, no linking error, spans ≥ `min_cycle_frames` frames).
 - **Filename convention**: TIFFs are `{basename}_t{T}xy{P}c{C}.tif`; Z-slice TIFFs (written by `export --export-z-slices`, read by `assemble`) are `{basename}_t{T}xy{P}z{Z}c{C}.tif`; masks follow Omnipose pattern `*cp_masks.png`.
 - **Output replacement**: `align`/`assemble` replace `xy*/phase/` and `xy*/fluor*/`; `track` replaces its own `*.h5` output in `cell/`; `masks/` is never modified.
 
-## Linking port: design decisions
+## Linking: design decisions
 
-Details and parity numbers are in `docs/supersegger_port.md`.
+Details, the evidence for each change and the tests are in `docs/linking.md`.
 
 - **Scope**: only `trackOpti` steps that decide lineages are ported: linking (step 4), cell marker (step 5), and the lineage fields of the cell files (step 10). Fluorescence, `CellA` geometry, foci and `clist` (steps 6–9) are not computed or saved, because downstream reads only per-cell masks, birth, death, motherID, daughterID, sisterID and divide.
-- **Bug-for-bug**: MATLAB quirks are kept on purpose and marked "MATLAB quirk". Examples: ghost (zero-area) labels, the label-collision quirk in merges, stale `death` (last frame + 1), the CellMarker stale index. Do not "fix" them without asking. Where MATLAB would error, the port raises `RuntimeError`. The equivalent port is the baseline: quirk fixes and the ITK v4 registration upgrade come later, each tested as a separate divergence against it.
-- **Opt-in fixes**: each departure from MATLAB is named in `track.FIXES` and switched on with the preset's `fixes` list. Numeric departures, such as `division_lookahead`, are `TrackingParams` keys whose default is SuperSegger's value. With an empty list and the defaults, the code paths are the baseline's. `docs/matlab_quirks.md` lists the quirks, the fixes and their results.
-- **Reference run**: `superSeggerGui` on Windows with preset 100XEc, Minimum Cell Age 3, Remove Stray off and `CONST.ignoreerror` unset (3 passes per frame). The presets hold these GUI-effective values, not the raw SuperSegger constants files.
-- **Registration**: `imreg.py` re-implements MATLAB's `imregtform`, which runs ITK's v3 framework. SimpleITK (ITK v4) is used only with the opt-in `itk_v4` fix; it is an optional dependency (`pip install -e ".[itk]"`). The reference is single-threaded `imregtform`, because Windows runs it on one thread; on macOS, use `maxNumCompThreads(1)` in MATLAB oracles.
-- **Splits are chaotic**: on the coarse pyramid levels, 1e-7 differences change the final transform. MATLAB with 10 threads does not reproduce MATLAB with 1 thread either. Judge split parity by outcome agreement rate, not exact masks. Everything except splits matches the err files exactly.
-- **Windows instead of full frames**: registration and the split watershed run on windows around the cells. Full-frame coordinates, centre, optimizer scales and pixel count are kept, so results do not depend on frame size.
+- **Not SuperSegger-faithful**: the code started as a bug-for-bug port, checked against SuperSegger's output on 260429, and now carries seven changes that cut merged cells by two thirds (`docs/linking.md`). No SuperSegger-equivalent mode is kept; that port, a switch per change and the parity scripts are in commit a40b03e. The assignment (`assign.py`) is still SuperSegger's, quirks included.
+- **Reference run**: `superSeggerGui` on Windows with preset 100XEc, Minimum Cell Age 3, Remove Stray off and `CONST.ignoreerror` unset (3 passes per frame). The presets hold these GUI-effective values, plus `division_lookahead`. Preset keys use descriptive names (`fragment_merge_area`, `drop_single_frame_strays`, `min_cycle_frames`); the SuperSegger-style names still load with a deprecation warning.
+- **Splits** (2 → 1): all previous cells are moved onto the fused region (centroid, then the best rotation within ±10°) and seed a watershed of its distance transform. SuperSegger's affine registration is not used: it rarely cuts the region, and is chaotic (MATLAB with 10 threads does not reproduce MATLAB with 1 thread).
 - **Behaviour MATLAB does not have**:
   - After 20 passes on one frame (`SAFETY_MAX_PASSES`), one last pass runs without mask edits, and a warning is printed. MATLAB can loop forever there.
-  - When a watershed plateau is at least 100 000 px (`PLATEAU_FAST`), only the cells plus a 2-pixel ring are flooded; the rest is filled from the nearest label.
+  - Where MATLAB would error, the code raises `RuntimeError`.
 - **Masks and output**:
   - Edited masks are kept compressed in memory. No `masksOS/` is written.
-  - Ghost cells are written with empty masks, as MATLAB does.
+  - Labels without pixels (ghosts) get no cell file, and `death` is the cell's last frame.
   - `birth`/`death` are frame numbers rather than file indices; the two only differ when a mask frame is missing.
-  - Progress is printed every 50 frames, because a 361-frame position takes 30–60 min.
+  - Progress is printed every 50 frames, because a 361-frame position takes 10–35 min.
 
 ## Behavioral guidelines
 
