@@ -34,6 +34,7 @@ class Frame:
         self.edited = False  # labels differ from the Omnipose mask
         self.packed: bytes | None = None  # compressed edited labels
         self.colony = None  # (labels, centroids) cache of assign.colonies
+        self.pairs = None  # touching-region pairs cache of assign.neighbor_pairs
         self.reset_lineage()
         empty = [[] for _ in range(n + 1)]
         self.map_r, self.map_f = [list(x) for x in empty], [list(x) for x in empty]
@@ -61,7 +62,12 @@ class Frame:
             np.savez_compressed(buf, labels=self.labels)
             self.packed = buf.getvalue()
         self.labels = None
+        self.invalidate()
+
+    def invalidate(self) -> None:
+        """Drop the caches derived from the labels (after an in-place edit)."""
         self.colony = None
+        self.pairs = None
 
     def edited_labels(self) -> np.ndarray | None:
         """The edited label image, or None if the Omnipose mask is unchanged."""
@@ -408,7 +414,7 @@ def delete_regions(c: Frame, regs: list[int]) -> None:
         xs = slice(xmin - 1, xmin + math.floor(w) - 1)
         box = c.labels[ys, xs]
         box[box == mm] = 0
-    c.colony = None
+    c.invalidate()
 
 
 def error_rez(
