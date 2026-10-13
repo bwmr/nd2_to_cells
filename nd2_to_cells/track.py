@@ -1,18 +1,19 @@
 """Cell tracker: links Omnipose masks across frames, writes cell*.h5.
 
-The linking is a bug-for-bug port of SuperSegger/OmniSegger's trackOpti
-steps 3-10, restricted to what determines lineages (see
-docs/supersegger_port.md):
+The linking follows SuperSegger/OmniSegger's trackOpti steps 3-10, restricted
+to what determines lineages, with changes that reduce merged cells (see
+docs/linking.md):
     1. trackOptiLinkCellMulti: frame-to-frame assignment (assign.py), error
        resolution with mask merges and splits, re-running a frame after each
-       mask edit (link.py, mask_edit.py, imreg.py).
+       mask edit (link.py, mask_edit.py).
     2. trackOptiCellMarker: complete cell cycles (stat0 = 2).
     3. trackOptiCellFiles: one HDF5 file per cell ID; lineage fields from the
        cell's last frame; Cell{ID} when that frame has stat0 = 2.
 Fluorescence, cell geometry, foci and clist are not computed.
 
-Memory design: linking holds 3 full labeled frames (previous, current, next)
-plus scalar region tables for all frames; edited masks are kept compressed.
+Memory design: linking holds the previous, current and next labeled frames
+plus division_lookahead - 1 look-ahead frames (5 frames with the presets),
+and scalar region tables for all frames; edited masks are kept compressed.
 Writing holds one frame plus crop buffers for all tracks until the end, so
 memory grows with movie length x cell count.
 """
@@ -36,45 +37,28 @@ from nd2_to_cells.link import Frame, cell_marker, link_frames
 
 _PRESET_DIR = Path(__file__).parent.parent / "presets"
 
-# Opt-in departures from SuperSegger, named in a preset's `fixes` list. Each is
-# tested on its own against the bug-for-bug baseline (docs/linking_report_tests.md).
-FIXES = {
-    "label_collision": "labels written by mask edits never reuse a label in use",
-    "area_penalty": "area changes above 60 % get the 1000 penalty, not 50",
-    "split_needs_two": "a split succeeds only if it yields two pieces",
-    "death_last_frame": "death is the cell's last frame (MATLAB's can be one later)",
-    "drop_ghosts": "labels without pixels are not written as cells",
-    "itk_v4": "split registration with ITK v4 (SimpleITK), not MATLAB's v3 path",
-    "seeded_split": "split a fused region with the previous cells as seeds",
-    "rigid_split": "seeded_split with the cells rotated (rigid alignment) first",
-    "end_on_merge": "a fused region that is not split becomes a new cell",
-    "assign_rev": "fixProblems also updates the reverse map",
-    "assign_all_regions": "fixProblems uses all regions an f region maps to",
-    "assign_robbed_area": "fixProblems normalises by the robbed cell's area",
-    "assign_exchange": "exchangeAssignment skips a region nobody holds",
-    "assign_nan": "exchangeAssignment skips an all-NaN cost row",
-    "division_both_sisters": "no division if either sister already has an ID",
-    "f_no_match": "1 -> 3+: pieces without a forward map count as no match",
-    "f_gate": "1 -> 3+: the subset merge is off in the final pass",
-    "marker_chain": "cell marker drops a lineage whose backward map breaks",
-    "merge_fallback": "a 1 -> 2 merge that fails becomes a division, not orphans",
-    "orphan_split": "a cell without forward link inside a continued region: 2 -> 1",
-}
-
 
 @dataclass
 class TrackingParams:
-    """SuperSegger CONST.trackOpti values as used by a superSeggerGui run."""
+    """Linking parameters; SuperSegger's CONST.trackOpti names in comments."""
 
     da_max: float = 0.3  # DA_MAX
     da_min: float = -0.2  # DA_MIN
-    small_area_merge: int = 50  # SMALL_AREA_MERGE
-    remove_stray: bool = False  # REMOVE_STRAY
-    min_cell_age: int = 3  # MIN_CELL_AGE (GUI default)
-    fixes: tuple[str, ...] = ()  # not in SuperSegger: names from FIXES
+    fragment_merge_area: int = 50  # SMALL_AREA_MERGE
+    drop_single_frame_strays: bool = False  # REMOVE_STRAY
+    min_cycle_frames: int = 4  # MIN_CELL_AGE + 1
     # Not in SuperSegger (1 there): a split whose pieces fuse again within
     # this many frames is merged instead of called a division.
-    division_lookahead: int = 1
+    division_lookahead: int = 3
+
+
+# Preset keys of earlier versions, still accepted; values carry over as-is
+# (the earlier min_cell_age counted frames, as min_cycle_frames does).
+_DEPRECATED_KEYS = {
+    "small_area_merge": "fragment_merge_area",
+    "remove_stray": "drop_single_frame_strays",
+    "min_cell_age": "min_cycle_frames",
+}
 
 
 def load_preset(preset: str) -> TrackingParams:
@@ -89,15 +73,24 @@ def load_preset(preset: str) -> TrackingParams:
         )
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
-    p = data.get("tracking", {})
-    params = TrackingParams(
+    p = dict(data.get("tracking", {}))
+    for old, new in _DEPRECATED_KEYS.items():
+        if old not in p:
+            continue
+        value = p.pop(old)
+        if new in p:
+            print(f"[warn] preset {path.name}: {old!r} ignored, {new!r} is also set")
+        else:
+            print(f"[warn] preset {path.name}: {old!r} is deprecated, use {new!r}")
+            p[new] = value
+    unknown = sorted(set(p) - set(TrackingParams.__dataclass_fields__))
+    if unknown:
+        print(
+            f"[warn] preset {path.name}: ignoring unknown key(s) {', '.join(unknown)}"
+        )
+    return TrackingParams(
         **{k: v for k, v in p.items() if k in TrackingParams.__dataclass_fields__}
     )
-    params.fixes = tuple(params.fixes)
-    unknown = sorted(set(params.fixes) - set(FIXES))
-    if unknown:
-        raise ValueError(f"Unknown fixes {unknown} in {path}; known: {sorted(FIXES)}")
-    return params
 
 
 # ---------------------------------------------------------------------------
@@ -152,18 +145,18 @@ class Track:
     stat0: int = 0  # 2 = complete cell cycle
 
 
-def _build_tracks(states: list[Frame], frames: list[int], fixes=()) -> dict[int, Track]:
+def _build_tracks(states: list[Frame], frames: list[int]) -> dict[int, Track]:
     """One track per cell ID; lineage fields come from the ID's last frame.
 
     ``frames[i]`` is the 0-based absolute frame of file i. SuperSegger's birth
-    and death are file indices; they are converted to 1-based frame numbers.
-    Fixes: "drop_ghosts" skips labels without pixels; "death_last_frame" sets
-    death to the last frame (MATLAB's field can be stale, one frame later).
+    is a file index; it is converted to a 1-based frame number. Not
+    SuperSegger: labels without pixels (ghosts) are skipped, and death is the
+    cell's last frame (SuperSegger's field can be one frame later).
     """
     tracks: dict[int, Track] = {}
     for i, fr in enumerate(states):
         for k in range(1, fr.num_regs + 1):
-            if "drop_ghosts" in fixes and not fr.area[k]:
+            if not fr.area[k]:
                 continue
             cid = int(fr.ID[k])
             track = tracks.setdefault(cid, Track(track_id=cid))
@@ -176,15 +169,13 @@ def _build_tracks(states: list[Frame], frames: list[int], fixes=()) -> dict[int,
             track.bboxes.append((r0, c0, r0 + int(h), c0 + int(w)))
             # intUpCell: every frame overwrites the lineage fields.
             track.birth = frames[int(fr.birth[k]) - 1] + 1
-            track.death = frames[min(int(fr.death[k]), len(frames)) - 1] + 1
             track.divide = bool(fr.divide[k])
             track.mother_id = int(fr.motherID[k])
             track.sister_id = int(fr.sisterID[k])
             track.daughter_ids = [int(x) for x in fr.daughterID[k]]
             track.stat0 = int(fr.stat0[k])
-    if "death_last_frame" in fixes:
-        for track in tracks.values():
-            track.death = track.frames[-1] + 1
+    for track in tracks.values():
+        track.death = track.frames[-1] + 1
     return tracks
 
 
@@ -440,8 +431,8 @@ def _track_position(
         warn=lambda msg: print(f"  [warn] {xy_dir.name}: {msg}"),
         progress=progress,
     )
-    cell_marker(states, params.min_cell_age, params.fixes)
-    tracks = _build_tracks(states, [f for f, _ in mask_paths], params.fixes)
+    cell_marker(states, params.min_cycle_frames)
+    tracks = _build_tracks(states, [f for f, _ in mask_paths])
     print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 file(s)...")
 
     buffers = _alloc_track_buffers(tracks, img_shape, pad)
@@ -516,9 +507,10 @@ def run_track(
     print(
         f"Tracking {len(xy_dirs)} position(s) with preset '{preset}' "
         f"(da_min={params.da_min}, da_max={params.da_max}, "
-        f"small_area_merge={params.small_area_merge}, "
-        f"remove_stray={params.remove_stray}, min_cell_age={params.min_cell_age}"
-        + (f", fixes={list(params.fixes)})" if params.fixes else ")")
+        f"fragment_merge_area={params.fragment_merge_area}, "
+        f"drop_single_frame_strays={params.drop_single_frame_strays}, "
+        f"min_cycle_frames={params.min_cycle_frames}, "
+        f"division_lookahead={params.division_lookahead})"
     )
 
     args = [(str(d), preset, pad, consolidated) for d in xy_dirs]

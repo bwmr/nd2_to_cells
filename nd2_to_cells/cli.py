@@ -248,13 +248,14 @@ def track_cmd(data_dir, preset, workers, pad, consolidated):
     """Link cells across frames and write HDF5 output.
 
     Reads Omnipose PNG masks from xy{N}/masks/, links regions across
-    frames with a port of SuperSegger's linking (including its mask merges
-    and splits), and writes HDF5 output to xy{N}/cell/.
+    frames with SuperSegger's linking (including its mask merges and
+    splits, with changes that reduce merged cells), and writes HDF5 output
+    to xy{N}/cell/.
 
     By default, writes one file per tracked cell: cell{ID:07d}.h5
     (lowercase) or Cell{ID:07d}.h5 (uppercase, capital C = complete cell
-    cycle: born from a division, divides, no linking error, and divides at
-    least min_cell_age frames after birth).
+    cycle: born from a division, divides, no linking error, and spans at
+    least min_cycle_frames frames).
 
     With --consolidated, writes a single cells.h5 per position where each
     cell is stored as a group (e.g. cells.h5/Cell0000002/mask).

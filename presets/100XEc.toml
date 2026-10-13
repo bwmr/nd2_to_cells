@@ -1,24 +1,37 @@
 # Tracking parameters for E. coli at 100x (60 nm/px).
-# Effective SuperSegger CONST.trackOpti values of a superSeggerGui run with the
-# 100XEc preset (settings/100XEc.mat + loadConstants.m + GUI defaults).
+# Values are those of a superSeggerGui run with the 100XEc preset (Minimum
+# Cell Age 3, Remove Stray off), plus division_lookahead, which SuperSegger
+# doesn't have. See docs/linking.md. Presets that still use the old
+# SuperSegger-style names (small_area_merge, remove_stray, min_cell_age) load
+# with a deprecation warning.
 
 [tracking]
-# Area-change limits (DA_MIN / DA_MAX). Normalised area change outside
-# [da_min, da_max] flags a linking error (ehist), and the division and merge
-# tests in errorRez require the change to lie inside.
+# Area-change limits (SuperSegger's DA_MIN / DA_MAX). A normalised area change
+# outside [da_min, da_max] flags a linking error, and the division and merge
+# tests require the change of the two pieces together to lie inside.
 da_max = 0.3
 da_min = -0.2
 
-# Two regions that map back to the same cell are merged if either is smaller
-# than this (pixels), among other conditions (SMALL_AREA_MERGE).
-small_area_merge = 50
+# When a cell splits into two pieces and one of them is smaller than this area
+# (pixels), the pieces are merged back into one cell instead of recording a
+# division, if they touch (one region after a 3x3 closing) and their combined
+# area change is within [da_min, da_max] (SuperSegger's SMALL_AREA_MERGE). A
+# previous cell this large or larger that disappears into a neighbour is split
+# off again.
+fragment_merge_area = 50
 
-# Delete regions with no backward and no forward map (REMOVE_STRAY). Off in
-# SuperSegger: loadConstants does not copy it from the preset, and the GUI
-# checkbox defaults to off.
-remove_stray = false
+# If true, delete regions with no predecessor and no successor (one-frame
+# strays); they get no cell file. SuperSegger's REMOVE_STRAY; 100XEc.mat sets
+# it to 1, but SuperSegger's loadConstants doesn't copy it, so SuperSegger
+# runs with it off.
+drop_single_frame_strays = false
 
-# A complete cell cycle (Cell{ID}.h5) divides at least this many frames after
-# its birth, i.e. spans min_cell_age + 1 frames or more (MIN_CELL_AGE;
-# superSeggerGui default 3).
-min_cell_age = 3
+# Minimum number of frames, birth and division frame included, for a cell
+# cycle to count as complete (Cell vs cell filename capitalisation).
+# SuperSegger's MIN_CELL_AGE + 1 (the superSeggerGui default is 3).
+min_cycle_frames = 4
+
+# A split whose pieces fuse again within this many frames is merged back
+# (segmentation flicker) instead of being called a division. SuperSegger
+# looks one frame ahead (1).
+division_lookahead = 3

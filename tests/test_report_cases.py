@@ -1,18 +1,15 @@
 """Real-data cases of issues A and B from the 260429 linking report.
 
-Each case is a merge event of the baseline's full run on 260429. At frame t,
-the track holding point T absorbs the track holding point X. Both points are
-(y, x) in the full image and lie inside the two cells at t-1. Linking only
-the window of frames start ... t+2 reproduces the full run's event.
+Each case is a merge event of a SuperSegger-equivalent run on 260429: at
+frame t, the track holding point T absorbed the track holding point X. Both
+points are (y, x) in the full image and lie inside the two cells at t-1. Only
+the window of frames start ... t+2 is linked.
 
-- test_baseline_event: the baseline still produces each event (snapshot).
-- test_merge_resolved: the desired outcome. Neither of the two cells absorbs
-  a track, or is absorbed, at t. Alternatively one track holds both at t-1
-  without having absorbed another track (a split not called a division).
-  Configurations are expected to fail it (strict xfail) for every case not
-  listed in RESOLVED.
+The test asks for the desired outcome: neither of the two cells absorbs a
+track, or is absorbed, at t. Alternatively one track holds both at t-1
+without having absorbed another track (a split not called a division).
 
-Needs ND2C_TEST_DATA, the 260429 folder (read only). Takes about 7 min.
+Needs ND2C_TEST_DATA, the 260429 folder (read only). Takes about 4 min.
 """
 
 from dataclasses import dataclass
@@ -35,14 +32,14 @@ class Case:
     start: int  # first frame of the window
     point_t: tuple[int, int]  # inside the absorbing cell at t-1
     point_x: tuple[int, int]  # inside the absorbed cell at t-1
-    kind: str  # event kind in the baseline
+    kind: str  # event kind in the SuperSegger-equivalent run
 
 
 CASES = {
-    # Report figure A (IoU linker: daughters re-fuse at t=91). The port picks
-    # the cell up into a track ~800 px away (label collision) at t=90.
+    # Report figure A (IoU linker: daughters re-fuse at t=91). SuperSegger
+    # picks the cell up into a track ~800 px away (label collision) at t=90.
     "report_fig_A": Case("xy04", 90, 80, (1824, 865), (1070, 536), "far"),
-    # Report figure B (neighbour merged at t=340); the port's pair are sisters.
+    # Report figure B (neighbour merged at t=340); SuperSegger's pair are sisters.
     "report_fig_B": Case("xy04", 340, 325, (693, 1689), (685, 1747), "A"),
     "xy01_A": Case("xy01", 191, 181, (1808, 844), (1784, 868), "A"),
     "xy02_A": Case("xy02", 133, 123, (1262, 648), (1251, 583), "A"),
@@ -54,60 +51,11 @@ CASES = {
     "xy04_B": Case("xy04", 198, 188, (689, 1663), (657, 1667), "B"),
 }
 
-# Cases each configuration is expected to resolve (measured on 260429).
-NINE = {
-    "report_fig_A",
-    "report_fig_B",
-    "xy01_A",
-    "xy01_B",
-    "xy02_A",
-    "xy02_B",
-    "xy03_A",
-    "xy04_A",
-    "xy04_B",
-}
-RESOLVED: dict[str, set[str]] = {
-    "baseline": set(),
-    "label_collision": {"report_fig_A"},
-    "area_penalty": set(),
-    "split_needs_two": set(),
-    "itk_v4": {"xy04_A"},
-    "lookahead3": set(),
-    "seeded_split": {"xy01_A"},
-    "end_on_merge": {
-        "report_fig_B",
-        "xy01_A",
-        "xy01_B",
-        "xy02_A",
-        "xy02_B",
-        "xy04_A",
-        "xy04_B",
-    },
-    "assign_bookkeeping": set(),
-    "errorrez_bookkeeping": set(),
-    "lc_itk_v4": {"report_fig_A", "xy03_A", "xy04_A"},
-    "lc_seeded_split": NINE,
-    "lc_merge_fallback": {"report_fig_A"},
-    "lc_lookahead3": {"report_fig_A"},
-    "combined": NINE,
-    "combined_end": NINE,
-    "lc_seeded_orphan": NINE,
-    "combined_orphan": NINE,
-    "combined_orphan_plus": NINE - {"xy01_B"},
-    "combined_orphan_rigid": set(CASES),
-}
 
-_runs: dict[tuple[str, str], dict[int, Track]] = {}
-
-
-def run_case(name: str, config: str, tmp_path_factory) -> dict[int, Track]:
-    if (name, config) not in _runs:
-        case = CASES[name]
-        masks = sorted((DATA / case.pos / "masks").glob("*cp_masks.png"))
-        frames = {t: masks[t] for t in range(case.start, case.t + 3)}
-        out = tmp_path_factory.mktemp(f"{name}_{config}")
-        _runs[name, config] = link(out, frames, config)
-    return _runs[name, config]
+def run_case(name: str, tmp_path) -> dict[int, Track]:
+    case = CASES[name]
+    masks = sorted((DATA / case.pos / "masks").glob("*cp_masks.png"))
+    return link(tmp_path, {t: masks[t] for t in range(case.start, case.t + 3)})
 
 
 def track_at(tracks: dict[int, Track], t: int, point: tuple[int, int]):
@@ -129,24 +77,9 @@ def pair(tracks, case: Case):
 
 
 @pytest.mark.parametrize("name", sorted(CASES))
-def test_baseline_event(name, tmp_path_factory):
+def test_merge_resolved(name, tmp_path):
     case = CASES[name]
-    tracks = run_case(name, "baseline", tmp_path_factory)
-    t, x = pair(tracks, case)
-    assert t is not None and x is not None and t is not x
-    assert any(
-        (e.frame, e.cell, e.absorbed, e.kind) == (case.t, t.key, x.key, case.kind)
-        for e in find_events(tracks)
-    )
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_merge_resolved(name, config, tmp_path_factory, request):
-    if name not in RESOLVED[config]:
-        mark = pytest.mark.xfail(strict=True, raises=AssertionError, reason="open")
-        request.applymarker(mark)
-    case = CASES[name]
-    tracks = run_case(name, config, tmp_path_factory)
+    tracks = run_case(name, tmp_path)
     t, x = pair(tracks, case)
     assert t is not None and x is not None, "a cell is not tracked at t-1"
     events = find_events(tracks)

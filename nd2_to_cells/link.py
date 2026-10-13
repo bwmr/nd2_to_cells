@@ -1,5 +1,9 @@
-"""Cell linking: port of SuperSegger's trackOptiLinkCellMulti, errorRez and
-trackOptiCellMarker (bug-for-bug; see docs/supersegger_port.md).
+"""Cell linking, derived from SuperSegger's trackOptiLinkCellMulti, errorRez
+and trackOptiCellMarker (see docs/linking.md).
+
+The structure and the case analysis follow SuperSegger; what differs is
+marked "Not SuperSegger", and SuperSegger behaviour that is kept although it
+looks wrong is marked "MATLAB quirk".
 
 Region labels are 1-based: per-region arrays and lists have an unused entry at
 index 0, so label k is at index k (as in MATLAB's regs.* fields). Times are
@@ -33,24 +37,19 @@ class Frame:
         empty = [[] for _ in range(n + 1)]
         self.map_r, self.map_f = [list(x) for x in empty], [list(x) for x in empty]
         self.revmap_r: list[list[int]] = []
-        self.revmap_f: list[list[int]] = []
         self.error_r = np.zeros(n + 1)
-        self.error_f = np.zeros(n + 1)
-        self.cost_r = self.cost_f = np.zeros(0)
-        self.ids_c_r = self.ids_r_r = self.ids_c_f = self.ids_f_f = np.zeros((2, 0))
+        self.cost_r = np.zeros(0)
+        self.ids_c_r = self.ids_r_r = np.zeros((2, 0))
         self.d_area_r = np.full(n + 1, np.nan)
-        self.d_area_f = np.full(n + 1, np.nan)
 
     def reset_lineage(self) -> None:
         """Lineage fields as updateRegionFields initialises them."""
         n = self.num_regs
         for name in (
-            "ID", "birth", "birthF", "death", "deathF", "age", "divide",
-            "ehist", "stat0", "sisterID", "motherID",
+            "ID", "birth", "divide", "ehist", "stat0", "sisterID", "motherID",
         ):  # fmt: skip
             setattr(self, name, np.zeros(n + 1, dtype=np.int64))
         self.daughterID: list[list[int]] = [[] for _ in range(n + 1)]
-        self.label: list[str] = [""] * (n + 1)  # error.label
 
     def release_labels(self) -> None:
         """Drop the label image; keep a compressed copy if it was edited."""
@@ -69,14 +68,13 @@ class Frame:
         return np.load(io.BytesIO(self.packed))["labels"]
 
     def set_assignment(self, side: str, res) -> None:
+        """Keep what errorRez reads: the backward fields, the forward map."""
         if side == "r":
             self.map_r, self.error_r, self.cost_r = res.assignments, res.error, res.cost
             self.ids_c_r, self.ids_r_r, self.d_area_r = res.ids_c, res.ids_f, res.d_area
             self.revmap_r = res.rev
         else:
-            self.map_f, self.error_f, self.cost_f = res.assignments, res.error, res.cost
-            self.ids_c_f, self.ids_f_f, self.d_area_f = res.ids_c, res.ids_f, res.d_area
-            self.revmap_f = res.rev
+            self.map_f = res.assignments
 
 
 def region_props(labels: np.ndarray) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
@@ -146,7 +144,7 @@ def link_frames(
                 raw[i] = load_mask(i).astype(np.int32)
             ahead.append(raw[i])
         raw = {i: m for i, m in raw.items() if i > t}
-        data_c, cell_count, _ = process_frame(
+        data_c, cell_count = process_frame(
             t, data_c, data_r, data_f, params, cell_count, warn, ahead
         )
         states.append(data_c)
@@ -169,16 +167,16 @@ def process_frame(
     cell_count: int,
     warn: Callable[[str], None] = print,
     ahead: list[np.ndarray] | None = None,
-) -> tuple[Frame, int, int]:
+) -> tuple[Frame, int]:
     """One frame of trackOptiLinkCellMulti: link, re-running after mask edits.
 
     ``data_r`` is mutated and keeps changes made by aborted passes, as in
     MATLAB. ``ahead`` holds the masks after data_f, for the division
-    look-ahead. Returns (final data_c, cell_count, number of passes).
+    look-ahead. Returns (final data_c, cell_count).
     """
 
     def assign_(a, b, forward):
-        return assign(a, b, forward, params.da_min, params.da_max, params.fixes)
+        return assign(a, b, forward, params.da_min, params.da_max)
 
     cur_iter = 1
     while True:
@@ -203,7 +201,7 @@ def process_frame(
             ahead or [],
         )
         if not reset:
-            return data_c, cell_count, cur_iter
+            return data_c, cell_count
         cur_iter += 1
         cell_count = last_count
         data_c = Frame(data_c.labels)
@@ -215,20 +213,9 @@ def process_frame(
 # ---------------------------------------------------------------------------
 
 
-def _mf(x) -> str:
-    """num2str for a scalar or a label list."""
-    if isinstance(x, list):
-        return "  ".join(str(int(v)) for v in x)
-    return str(int(x))
-
-
 def create_new_cell(c: Frame, k: int, time: int, cell_count: int) -> int:
     cell_count += 1
-    c.death[k] = time
-    c.deathF[k] = 1
     c.birth[k] = time
-    c.birthF[k] = 1
-    c.age[k] = 1
     c.divide[k] = 0
     c.ehist[k] = 0
     c.stat0[k] = 0
@@ -241,11 +228,7 @@ def create_new_cell(c: Frame, k: int, time: int, cell_count: int) -> int:
 
 def continue_cell_line(c: Frame, k: int, r: Frame, reg_r: int, time: int, err: bool):
     if not np.any(c.ID[1:] == r.ID[reg_r]):
-        c.death[k] = time
-        c.deathF[k] = 1
         c.birth[k] = r.birth[reg_r]
-        c.birthF[k] = 0
-        c.age[k] = r.age[reg_r] + 1
         c.divide[k] = 0
         c.ehist[k] = int(bool(r.ehist[reg_r]) or bool(err))
         c.stat0[k] = r.stat0[reg_r]
@@ -253,8 +236,6 @@ def continue_cell_line(c: Frame, k: int, r: Frame, reg_r: int, time: int, err: b
         c.motherID[k] = r.motherID[reg_r]
         c.daughterID[k] = []
         c.ID[k] = r.ID[reg_r]
-        r.death[reg_r] = time
-        r.deathF[reg_r] = 0
         r.divide[reg_r] = 0
     # else: "ID PROBLEM" (another region already took the ID); nothing changes
 
@@ -268,11 +249,8 @@ def mark_division_event(
     err: int,
     s2: int,
     cell_count: int,
-    fixes=(),
 ) -> int:
     if c.ID[s1]:  # MATLAB quirk: only sister 1 is checked
-        return cell_count
-    if "division_both_sisters" in fixes and c.ID[s2]:
         return cell_count
     cell_count += 1
     _new_daughter(c, s1, r, reg_r, time, err, sister_id=cell_count + 1, cid=cell_count)
@@ -284,11 +262,7 @@ def mark_division_event(
 
 
 def _new_daughter(c, s, r, reg_r, time, err, sister_id, cid) -> None:
-    c.death[s] = time
-    c.deathF[s] = 1
     c.birth[s] = time
-    c.birthF[s] = 1
-    c.age[s] = 1
     c.divide[s] = 0
     c.ehist[s] = err
     c.stat0[s] = int(not err)
@@ -298,15 +272,11 @@ def _new_daughter(c, s, r, reg_r, time, err, sister_id, cid) -> None:
     c.ID[s] = cid
 
 
-def create_division(c, r, mother, s1, s2, cell_count, time, fixes=()) -> int:
-    # The [L1,L2,Sc] suffix of MATLAB's label is not computed (cellprops3).
-    c.label[s1] = (
-        f"Frame: {time}, reg: {s1} and {s2} . cell division from mother reg{mother}"
-    )
+def create_division(c, r, mother, s1, s2, cell_count, time) -> int:
     r.error_r[mother] = 0
     c.error_r[s1] = 0
     c.error_r[s2] = 0
-    return mark_division_event(c, s1, r, mother, time, 0, s2, cell_count, fixes)
+    return mark_division_event(c, s1, r, mother, time, 0, s2, cell_count)
 
 
 def map_to_best_of_two(c: Frame, k: int, r: Frame, map_cr: list[int], time: int):
@@ -322,12 +292,11 @@ def map_to_best_of_two(c: Frame, k: int, r: Frame, map_cr: list[int], time: int)
             raise RuntimeError("mapToBestOfTwo: MATLAB errors here (|| on non-scalar)")
         first = bool(cost1[0] < cost2[0] or np.isnan(cost2[0]))
     c.error_r[k] = 2
-    c.label[k] = f"Frame: {time}, reg: {k}. Map to minimum cost"
     continue_cell_line(c, k, r, map_cr[0] if first else map_cr[1], time, True)
 
 
 def map_best_of_two(
-    c, map_rc, r, map_cr, time, cell_count, data_f, remove_stray, to_delete
+    c, map_rc, r, map_cr, time, cell_count, data_f, drop_strays, to_delete
 ):
     """mapBestOfTwo: continue the best of map_rc, make the others new cells."""
     reset = False
@@ -338,20 +307,12 @@ def map_best_of_two(
     for m in remove:
         c.error_r[m] = 1
     mod_ids = remove + [keeper]
-    if remove_stray and data_f is not None and _no_fw_mapping(c, remove):
-        c.label[remove[0]] = (
-            f"Frame: {time}, reg: {remove[0]} was not the best match for "
-            f"{_mf(map_cr)} and was deleted.{keeper} was."
-        )
+    if drop_strays and data_f is not None and _no_fw_mapping(c, remove):
         to_delete.extend(remove)
         reset = True
     else:
         for m in remove:
             cell_count = create_new_cell(c, m, time, cell_count)
-            c.label[m] = (
-                f"Frame: {time}, reg: {m} was not the best match for "
-                f"{_mf(map_cr)}. Converted into a new cell."
-            )
     return cell_count, reset, mod_ids
 
 
@@ -380,9 +341,9 @@ def _eq_any(a: list[int], b: list[int]) -> bool:
 def _orphans(c: Frame, r: Frame, min_area: float) -> dict[int, list[int]]:
     """Previous cells with no forward link, by the c region holding them.
 
-    Not in MATLAB (the "orphan_split" fix). A cell of r at least min_area
-    large whose forward map is empty is assigned to the c region that covers
-    at least half of its pixels, if any.
+    Not SuperSegger. A cell of r at least min_area large whose forward map is
+    empty is assigned to the c region that covers at least half of its
+    pixels, if any.
     """
     out: dict[int, list[int]] = {}
     for j in range(1, r.num_regs + 1):
@@ -406,7 +367,7 @@ AHEAD_MARGIN = 20  # px around the two pieces searched in look-ahead masks
 def _fuse_ahead(c: Frame, s1: int, s2: int, f: Frame, ahead) -> bool:
     """Do pieces s1 and s2 of c run into the same label in a look-ahead mask?
 
-    Not in MATLAB. Each piece is followed from its regions in f (c.map_f)
+    Not SuperSegger. Each piece is followed from its regions in f (c.map_f)
     through the masks in ``ahead`` by largest overlap.
     """
     if not ahead or not c.map_f[s1] or not c.map_f[s2]:
@@ -457,16 +418,16 @@ def error_rez(
     no_edits: bool = False,
     ahead: list[np.ndarray] = (),
 ) -> tuple[int, bool]:
-    """Port of errorRez: resolve the maps into IDs; may edit c.labels.
+    """errorRez: resolve the maps into IDs; may edit c.labels.
 
     Returns (cell_count, reset). ``no_edits`` (safety cap, not in MATLAB)
     also blocks the edits MATLAB doesn't gate by ignoreError. ``ahead``: masks
     after f; a 1 -> 2 split whose pieces fuse again in one of them is merged
-    like one that fuses in f (division_lookahead, not in MATLAB).
+    like one that fuses in f (division look-ahead, not SuperSegger).
     """
     ignore_error = ignore_error or no_edits
-    remove_stray = params.remove_stray and not no_edits
-    min_area_merge = params.small_area_merge
+    drop_strays = params.drop_single_frame_strays and not no_edits
+    min_area_merge = params.fragment_merge_area
     da_min, da_max = params.da_min, params.da_max
     to_delete: list[int] = []
     reset = False
@@ -478,29 +439,24 @@ def error_rez(
         nonlocal reset
         if no_edits:
             return False
-        done = merge_regions(c, regs, params.fixes)
+        done = merge_regions(c, regs)
         if done:
             c.edited = True
         reset = reset or done
         return done
 
-    def merge_or_divide(s1, s2, mother, matlab_merge) -> None:
-        """Merge a 1 -> 2 split. MATLAB quirk: if the merge fails (the closed
-        union is not connected), both pieces become new cells without a
-        mother. Not MATLAB: they divide instead with the "merge_fallback" fix,
-        and always when only the look-ahead asked for the merge."""
-        nonlocal cell_count
-        if merge([s1, s2]):
-            return
-        if not matlab_merge or "merge_fallback" in params.fixes:
-            cell_count = create_division(
-                c, r, mother, s1, s2, cell_count, time, params.fixes
-            )
+    def merge_or_divide(s1, s2, mother) -> None:
+        """Merge a 1 -> 2 split; if the closed union is not connected, divide.
 
+        Not SuperSegger, where both pieces become new cells without a mother.
+        """
+        nonlocal cell_count
+        if not merge([s1, s2]):
+            cell_count = create_division(c, r, mother, s1, s2, cell_count, time)
+
+    # Not SuperSegger: previous cells hidden in a continued region (2 -> 1).
     orphans = (
-        _orphans(c, r, min_area_merge)
-        if "orphan_split" in params.fixes and r is not None and not ignore_error
-        else {}
+        _orphans(c, r, min_area_merge) if r is not None and not ignore_error else {}
     )
 
     for k in range(1, c.num_regs + 1):
@@ -508,10 +464,9 @@ def error_rez(
             pass
         else:
             regs_r = c.map_r[k]  # rCellsFromC
-            regs_f = c.map_f[k]  # fCellsFromC
             if len(regs_r) == 1 and orphans.get(k):
-                # Not MATLAB: a previous cell without a forward link lies in
-                # k, so k holds two cells; handled as 2 -> 1 (E) below.
+                # Not SuperSegger: a previous cell without a forward link lies
+                # in k, so k holds two cells; handled as 2 -> 1 (E) below.
                 regs_r = regs_r + orphans[k]
             if regs_r:
                 # MATLAB quirk: x = c{[a b]} keeps the first element.
@@ -521,15 +476,10 @@ def error_rez(
                 c_from_r, c_transp = [], []
 
             if len(regs_r) == 0:  # A: stray
-                if time != 1 and (not c.map_f[k] and remove_stray):
-                    c.label[k] = (
-                        f"Frame: {time}, reg: {k}. is a stray region - Deleted."
-                    )
+                if time != 1 and (not c.map_f[k] and drop_strays):
                     to_delete.append(k)
                     reset = True
                 else:
-                    if time != 1:
-                        c.label[k] = f"Frame: {time}, reg: {k}. is a stray region."
                     cell_count = create_new_cell(c, k, time, cell_count)
 
             elif len(regs_r) == 1 and len(c_transp) == 1:  # B: continue
@@ -548,19 +498,17 @@ def error_rez(
                 no_match = not c.map_f[s1] or not c.map_f[s2]
                 same = not no_match and all(x in c.map_f[s2] for x in c.map_f[s1])
                 small = c_area[s1] < min_area_merge or c_area[s2] < min_area_merge
-                matlab_merge = no_match or same or small
+                merge_f = no_match or same or small  # SuperSegger's merge test
                 if (
                     good
                     and not ignore_error
                     and f is not None
-                    and (matlab_merge or _fuse_ahead(c, s1, s2, f, ahead))
+                    and (merge_f or _fuse_ahead(c, s1, s2, f, ahead))
                 ):
-                    merge_or_divide(s1, s2, mother, matlab_merge)
+                    merge_or_divide(s1, s2, mother)
                     mod_regions.update(c_transp)
                 elif good:
-                    cell_count = create_division(
-                        c, r, mother, s1, s2, cell_count, time, params.fixes
-                    )
+                    cell_count = create_division(c, r, mother, s1, s2, cell_count, time)
                     mod_regions.update(c_transp)
                 else:
                     cell_count, rst, mod = map_best_of_two(
@@ -571,7 +519,7 @@ def error_rez(
                         time,
                         cell_count,
                         f,
-                        remove_stray,
+                        drop_strays,
                         to_delete,
                     )
                     reset = reset or rst
@@ -601,62 +549,42 @@ def error_rez(
                         and all(x in c.map_f[s2] for x in c.map_f[s1])
                     )
                     small = c_area[s1] < min_area_merge or c_area[s2] < min_area_merge
-                    matlab_merge = no_match or same or small
-                    refuse = f is not None and _fuse_ahead(c, s1, s2, f, ahead)
-                    if good and not ignore_error and (matlab_merge or refuse):
-                        merge_or_divide(s1, s2, mother, matlab_merge)
+                    merge_f = no_match or same or small  # SuperSegger's merge test
+                    fuse_later = f is not None and _fuse_ahead(c, s1, s2, f, ahead)
+                    if good and not ignore_error and (merge_f or fuse_later):
+                        merge_or_divide(s1, s2, mother)
                         mod_regions.update(map_rc)
                     else:
                         cell_count = create_division(
-                            c, r, mother, s1, s2, cell_count, time, params.fixes
+                            c, r, mother, s1, s2, cell_count, time
                         )
                         mod_regions.update(map_rc)
                 elif (
                     len(s2s) == 1 and k_in and any(x != mother for x in c.map_r[s2s[0]])
                 ):
                     continue_cell_line(c, k, r, regs_r[0], time, c.error_r[k] > 0)
-                elif not k_in:
+                elif not k_in:  # incorrect mapping 1 to 2: a new cell
                     cell_count = create_new_cell(c, k, time, cell_count)
                     c.error_r[k] = 1
-                    c.label[k] = (
-                        f"Frame: {time}, reg: {k}. Incorrect Mapping 1 to 2 - "
-                        "making a new cell"
-                    )
-                else:
-                    c.label[k] = (
-                        f"Frame: {time}, reg: {k}. Error not fixed - two to 1 but "
-                        "don't know what to do."
-                    )
+                # else: not resolved; k becomes a new cell below
 
             elif len(regs_r) > 1:  # E: 2 -> 1, try to split
-                success = False
-                if not ignore_error:
-                    success = missing_seg_2to1(c, k, r, regs_r, f, regs_f, params.fixes)
-                if success:
+                if not ignore_error and missing_seg_2to1(c, k, r, regs_r):
                     c.edited = True
                     c.error_r[k] = 0
-                    c.label[k] = (
-                        f"Frame: {time}, reg: {k}. Segment added to fix 2 to 1 error"
-                    )
                     reset = True
-                elif "end_on_merge" in params.fixes:
-                    # Not MATLAB: neither cell continues on the fused region.
-                    cell_count = create_new_cell(c, k, time, cell_count)
-                    c.error_r[k] = 1
-                    c.label[k] = f"Frame: {time}, reg: {k}. 2 to 1 not split: new cell"
                 else:
                     map_to_best_of_two(c, k, r, regs_r, time)
 
             elif len(regs_r) == 1 and len(c_from_r) > 2:  # F: 1 -> 3+
-                no_match = False  # MATLAB quirk: isempty of a cell array
-                if "f_no_match" in params.fixes:
-                    no_match = any(not c.map_f[m] for m in c_from_r)
                 forw = [x for m in c_from_r for x in c.map_f[m]]
                 forward_map = sorted(set(forw))
                 occur = [forw.count(v) for v in forward_map]
-                same = not no_match and len(forward_map) == 1
-                some_same = not no_match and any(o > 1 for o in occur)
-                if f is not None and (no_match or same):
+                # MATLAB quirk: the "no forward match" test (isempty of a cell
+                # array) is never true.
+                same = len(forward_map) == 1
+                some_same = any(o > 1 for o in occur)
+                if f is not None and same:
                     if not ignore_error:
                         merge(list(c_from_r))
                         mod_regions.update(c_from_r)
@@ -669,7 +597,7 @@ def error_rez(
                             time,
                             cell_count,
                             f,
-                            remove_stray,
+                            drop_strays,
                             to_delete,
                         )
                         reset = reset or rst
@@ -677,12 +605,10 @@ def error_rez(
                 elif f is not None and some_same:
                     value_fw = [v for v, o in zip(forward_map, occur) if o > 1]
                     to_merge = [m for m in c_from_r if _eq_any(c.map_f[m], value_fw)]
-                    if not (ignore_error and "f_gate" in params.fixes):
-                        merge(to_merge)  # MATLAB quirk: not gated by ignoreError
+                    merge(to_merge)  # MATLAB quirk: not gated by ignoreError
                     mod_regions.update(to_merge)
 
-            else:  # G
-                c.label[k] = f"Frame: {time}, reg: {k}. Error not fixed"
+            # G: no case applies; k becomes a new cell below
 
         if c.ID[k] == 0:
             cell_count = create_new_cell(c, k, time, cell_count)
@@ -698,11 +624,13 @@ def error_rez(
 # ---------------------------------------------------------------------------
 
 
-def cell_marker(states: list[Frame], min_cell_age: int, fixes=()) -> None:
+def cell_marker(states: list[Frame], min_cycle_frames: int) -> None:
     """Mark complete cell cycles (stat0 = 2) by walking back from divisions.
 
-    With the "marker_chain" fix (not MATLAB), a lineage whose backward map
-    breaks is dropped instead of continuing from a stale region.
+    A cycle is complete if it spans at least min_cycle_frames frames, birth
+    and division frame included (SuperSegger's MIN_CELL_AGE + 1). Not
+    SuperSegger: a lineage whose backward map breaks is dropped, instead of
+    continuing from a stale region.
     """
     n_im = len(states)
     clist: list[list[int]] = []  # [ID, current region, birth]
@@ -710,21 +638,13 @@ def cell_marker(states: list[Frame], min_cell_age: int, fixes=()) -> None:
         c = states[i - 1]
         for ii in range(1, c.num_regs + 1):
             if c.divide[ii] and c.stat0[ii] and not c.ehist[ii]:
-                if i - c.birth[ii] >= min_cell_age:
+                if i - c.birth[ii] + 1 >= min_cycle_frames:
                     clist.append([int(c.ID[ii]), ii, int(c.birth[ii])])
-                else:
-                    c.label[ii] += (
-                        f"Frame: {i}, reg: {ii}. Division Failed: Cell age "
-                        f"{i - c.birth[ii]}< min age {min_cell_age}."
-                    )
         for row in clist:
             jj = row[1]
             if i >= row[2]:
-                # MATLAB quirk: on an error (no backward map) the try/catch
-                # skips the update, so jj goes stale for the next frame.
                 if jj > c.num_regs or not c.map_r[jj]:
-                    if "marker_chain" in fixes:
-                        row[2] = n_im + 1  # never matches i >= row[2] again
+                    row[2] = n_im + 1  # never matches i >= row[2] again
                     continue
                 row[1] = c.map_r[jj][0]
                 c.stat0[jj] = 2

@@ -1,15 +1,13 @@
 """Synthetic movies of rod-shaped cells, linked with `nd2_to_cells track`.
 
-Controls (growth, division) must come out right for every configuration.
-The merge scenarios follow issues A and B of the 260429 linking report: the
-desired outcome is that no track absorbs another one (the merged label is
-split, or both tracks end).
+Controls (growth, division) must come out right. The merge scenarios follow
+issues A and B of the 260429 linking report: no track may absorb another one
+(the merged label is split, or both tracks end).
 """
 
 import numpy as np
-import pytest
 
-from tests.conftest import CONFIGS, link
+from tests.conftest import link
 from tests.merge_events import find_events
 
 SHAPE = (160, 320)
@@ -58,15 +56,15 @@ def dividing_cell(
     return frames
 
 
-def test_growth(tmp_path, config):
+def test_growth(tmp_path):
     frames = movie([[(100, 100 + length)] for length in growing(60, 8)])
-    tracks = link(tmp_path, frames, config)
+    tracks = link(tmp_path, frames)
     assert [list(tr.frames) for tr in tracks.values()] == [list(range(8))]
     assert find_events(tracks) == []
 
 
-def test_division(tmp_path, config):
-    tracks = link(tmp_path, movie(dividing_cell(4, 5)), config)
+def test_division(tmp_path):
+    tracks = link(tmp_path, movie(dividing_cell(4, 5)))
     mother = [tr for tr in tracks.values() if tr.frames[0] == 0]
     daughters = [tr for tr in tracks.values() if tr.frames[0] == 4]
     assert len(mother) == 1 and list(mother[0].frames) == [0, 1, 2, 3]
@@ -77,57 +75,51 @@ def test_division(tmp_path, config):
     assert find_events(tracks) == []
 
 
-def test_daughters_fuse_after_division(tmp_path, config):
+def test_daughters_fuse_after_division(tmp_path):
     """Issue A: the daughters' labels fuse two frames after the division."""
-    tracks = link(tmp_path, movie(dividing_cell(4, 6, fuse_at=6)), config)
+    tracks = link(tmp_path, movie(dividing_cell(4, 6, fuse_at=6)))
     assert [e for e in find_events(tracks) if e.kind == "A"] == []
 
 
-def test_neighbours_fuse(tmp_path, config):
+def test_neighbours_fuse(tmp_path):
     """Issue B: two cells lying end to end fuse into one label."""
     frames = []
     for t, length in enumerate(growing(70, 10)):
         left = (160 - 3 - length, 160 - 3)
         right = (160 + 3, 160 + 3 + length)
         frames.append([(left[0], right[1])] if t >= 5 else [left, right])
-    tracks = link(tmp_path, movie(frames), config)
+    tracks = link(tmp_path, movie(frames))
     assert [e for e in find_events(tracks) if e.kind == "B"] == []
 
 
-def test_temporary_split(tmp_path, config, request):
-    """Omnipose splits a cell for two frames: not a division (with look-ahead)."""
-    if CONFIGS[config].get("division_lookahead", 1) < 3:
-        mark = pytest.mark.xfail(strict=True, raises=AssertionError, reason="open")
-        request.applymarker(mark)
-    tracks = link(tmp_path, movie(dividing_cell(4, 6, fuse_at=6)), config)
+def test_temporary_split(tmp_path):
+    """Omnipose splits a cell for two frames: not a division (look-ahead)."""
+    tracks = link(tmp_path, movie(dividing_cell(4, 6, fuse_at=6)))
     assert [list(tr.frames) for tr in tracks.values()] == [list(range(10))]
 
 
-def test_unmergeable_split_keeps_mother(tmp_path, config):
+def test_unmergeable_split_keeps_mother(tmp_path):
     """A split too wide to merge back: the pieces must not lose their mother.
 
-    MATLAB merges a temporary split only if the closed union is connected;
-    a failed merge must not leave two motherless cells (look-ahead).
+    A temporary split is merged only if the closed union is connected; a
+    failed merge must not leave two motherless cells (SuperSegger does).
     """
     frames = movie(dividing_cell(4, 6, fuse_at=6, gap=5))
-    tracks = link(tmp_path, frames, config)
+    tracks = link(tmp_path, frames)
     born = [tr for tr in tracks.values() if tr.frames[0] == 4]
     assert born and all(tr.mother for tr in born)
 
 
-def test_small_neighbour_fuses(tmp_path, config, request):
+def test_small_neighbour_fuses(tmp_path):
     """Issue B: a small cell fuses with a large one, within the area tolerance.
 
-    The assignment links the fused region to the large cell only, so errorRez
-    sees no 2 -> 1 and tries no split (fixed by "orphan_split").
+    The assignment links the fused region to the large cell only, so
+    SuperSegger's errorRez sees no 2 -> 1 and tries no split.
     """
-    if "orphan_split" not in CONFIGS[config].get("fixes", []):
-        mark = pytest.mark.xfail(strict=True, raises=AssertionError, reason="open")
-        request.applymarker(mark)
     frames = []
     for t, length in enumerate(growing(150, 10)):
         big = (40, 40 + length)
         small = (40 + length + 3, 40 + length + 3 + 28)
         frames.append([(big[0], small[1])] if t >= 5 else [big, small])
-    tracks = link(tmp_path, movie(frames), config)
+    tracks = link(tmp_path, movie(frames))
     assert [e for e in find_events(tracks) if e.kind == "B"] == []

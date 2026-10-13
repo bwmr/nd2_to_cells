@@ -1,10 +1,13 @@
 # Tracking parameters for P. aeruginosa at 100x (60 nm/px).
-# Effective SuperSegger CONST.trackOpti values of a superSeggerGui run with the
-# 100XPa preset. Differs from 100XEc only in SMALL_AREA_MERGE (30 vs 50).
+# See 100XEc.toml for what each key does.
+#
+# Differences from 100XEc:
+#   fragment_merge_area = 30  (vs 50 in Ec) — Pa cells are smaller
 
 [tracking]
-da_max           = 0.3
-da_min           = -0.2
-small_area_merge = 30
-remove_stray     = false
-min_cell_age     = 3
+da_max                   = 0.3
+da_min                   = -0.2
+fragment_merge_area      = 30
+drop_single_frame_strays = false
+min_cycle_frames         = 4
+division_lookahead       = 3

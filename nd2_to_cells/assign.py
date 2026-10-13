@@ -158,11 +158,8 @@ class AssignResult:
         self.rev = rev  # revAssign / revmap.{r,f}
 
 
-def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float, fixes=()):
-    """Port of multiAssignmentSparse(data_c, data_f, CONST, forward).
-
-    ``fixes``: opt-in departures from MATLAB (track.FIXES).
-    """
+def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float):
+    """Port of multiAssignmentSparse(data_c, data_f, CONST, forward)."""
     sign = 1 if forward else -1
     max_da = max(sign * da_min, sign * da_max)
     min_da = min(sign * da_min, sign * da_max)
@@ -343,12 +340,8 @@ def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float, fixes=
         outward_mot = -outward_mot
         penalty[area_change > 0.1] = 100
     # MATLAB quirk: the > 0.3 line overwrites the > 0.6 penalty.
-    if "area_penalty" in fixes:
-        penalty[np.abs(area_change) > 0.3] = 50
-        penalty[np.abs(area_change) > 0.6] = 1000
-    else:
-        penalty[np.abs(area_change) > 0.6] = 1000
-        penalty[np.abs(area_change) > 0.3] = 50
+    penalty[np.abs(area_change) > 0.6] = 1000
+    penalty[np.abs(area_change) > 0.3] = 50
     overlap_cost = 1 - overlap
     tot_cost = (
         penalty
@@ -409,14 +402,9 @@ def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float, fixes=
             f_already = assg[best_c]
             if not f_already:
                 assg[best_c] = [jj]  # MATLAB quirk: rev_a not updated
-                if "assign_rev" in fixes:
-                    rev_a[jj] = [best_c]
                 continue
             # MATLAB quirk: revAssign{FAlready} keeps only the first element.
-            if "assign_all_regions" in fixes:
-                rev_to_already = sorted({x for f in f_already for x in rev_a[f]})
-            else:
-                rev_to_already = list(rev_a[f_already[0]])
+            rev_to_already = list(rev_a[f_already[0]])
             area_c = float(np.sum(a_c[rev_to_already]))
             area_f_before = float(np.sum(a_f[f_already]))
             da_before = _div(area_f_before - area_c, max(area_f_before, area_c))
@@ -430,9 +418,8 @@ def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float, fixes=
                 if len(new_rev) != 1:
                     raise RuntimeError("fixProblems: MATLAB errors here (&& on vector)")
                 # MATLAB quirk: normalised by the stealer's area.
-                norm = a_c[new_rev[0]] if "assign_robbed_area" in fixes else area_c
                 new_da_already = _div(
-                    area_f_before - a_c[new_rev[0]], max(area_f_before, norm)
+                    area_f_before - a_c[new_rev[0]], max(area_f_before, area_c)
                 )
                 if not set_error(new_da_already):
                     if len(f_already) != 1:
@@ -457,14 +444,11 @@ def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float, fixes=
             if np.isnan(best_f):
                 continue
             best_f = int(best_f)
+            # MATLAB quirk: without a match bad_c is the last region.
             bad_c = 0
             for bad_c in range(1, len(assg)):
                 if assg[bad_c] and best_f in assg[bad_c]:
                     break
-            else:
-                # MATLAB quirk: without a match bad_c is the last region.
-                if "assign_exchange" in fixes:
-                    continue
             if cost.size == 0:
                 continue
             flag_c = (idx_c[0, :] == bad_c) & np.isnan(idx_c[1, :])
@@ -472,8 +456,6 @@ def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float, fixes=
             tmp = cost.copy()
             tmp[~flag_c] = np.nan
             tmp[flag_f] = np.nan
-            if "assign_nan" in fixes and np.isnan(tmp).all():
-                continue
             ind = matlab_argmin(tmp)  # MATLAB quirk: all-NaN gives column 1
             second = idx_f[:, ind]
             if np.isnan(second[1]) and int(second[0]) in left_in_f:

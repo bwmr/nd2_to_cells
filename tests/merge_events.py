@@ -7,12 +7,11 @@ the merged object can be less than JUMP (the report's 1.3x) times its area.
 
 Kind "A" (re-merge after division): X is T's sister. Kind "B" (neighbour
 absorbed): any other X within NEAR px of T at t-1. Kind "far": X is farther
-away, so the merged object spans distant cells; in the SuperSegger port this
-comes from MATLAB's label-collision quirk (two regions summed into one label
-in mask edits). Only the track output is read, so this works for any
-linker: per-cell cell*.h5 files (`nd2_to_cells track`) or one cells.h5
-(`--consolidated`, or the IoU linker on main). Tracks whose mask is empty in
-every frame (SuperSegger's ghost labels) are skipped.
+away, so the merged object spans distant cells; SuperSegger's mask edits
+produce these when two edits of one pass write the same label. Only the
+track output is read, so this works for any linker: per-cell cell*.h5 files
+or one cells.h5 (`--consolidated`). Tracks whose mask is empty in every frame
+(SuperSegger's ghost labels) are skipped.
 
 Usage, for whole positions:
     python tests/merge_events.py <cell dir> [<cell dir> ...] [--csv events.csv]

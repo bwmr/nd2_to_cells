@@ -28,7 +28,6 @@ nd2_to_cells = "nd2_to_cells.cli:cli"
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest"]
-itk = ["SimpleITK"]  # only for the opt-in "itk_v4" fix
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
