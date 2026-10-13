@@ -1,21 +1,13 @@
 # Tracking parameters for P. aeruginosa at 100x (60 nm/px).
-# Several values come from the SuperSegger preset 100XPa.mat; see 100XEc.toml
-# for what each key does.
+# See 100XEc.toml for what each key does.
 #
 # Differences from 100XEc:
-#   fragment_merge_area      = 30     (vs 50 in Ec) — Pa cells are smaller
-#   drop_single_frame_strays = false  (vs true in Ec) — keep one-frame strays
+#   fragment_merge_area = 30  (vs 50 in Ec) — Pa cells are smaller
 
 [tracking]
-min_link_iou             = 0.08
 da_max                   = 0.3
 da_min                   = -0.2
-min_area                 = 8
-min_area_no_neigh        = 30
 fragment_merge_area      = 30
 drop_single_frame_strays = false
-min_cycle_frames         = 6
-search_radius            = 15
-min_division_age         = 8
-min_sister_ratio         = 0.5
-confident_iou            = 0.3
+min_cycle_frames         = 4
+division_lookahead       = 3

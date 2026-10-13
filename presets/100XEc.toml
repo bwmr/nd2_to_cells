@@ -1,76 +1,37 @@
 # Tracking parameters for E. coli at 100x (60 nm/px).
-# Several values come from the SuperSegger preset 100XEc.mat, but no key does
-# exactly what its SuperSegger counterpart does; see the comment on each key
-# and docs/linking_comparison.md section 1.2. Presets that still use the old
-# SuperSegger-style names (overlap_limit_min, small_area_merge, remove_stray,
-# min_cell_age) load with a deprecation warning.
+# Values are those of a superSeggerGui run with the 100XEc preset (Minimum
+# Cell Age 3, Remove Stray off), plus division_lookahead, which SuperSegger
+# doesn't have. See docs/linking.md. Presets that still use the old
+# SuperSegger-style names (small_area_merge, remove_stray, min_cell_age) load
+# with a deprecation warning.
 
 [tracking]
-# Minimum IoU (mask overlap / mask union) for a region to be a link candidate.
-# 100XEc.mat has OVERLAP_LIMIT_MIN = 0.08, but SuperSegger never reads it.
-min_link_iou = 0.08
-
-# Maximum normalised area change between frames: (area_t1 - area_t) / area_t1.
-# Positive = growth. Links with IoU below confident_iou are rejected outside
-# [da_min, da_max]; the same limits test the combined area of a division.
-# Same value as SuperSegger's DA_MAX, but SuperSegger only flags such links as
-# errors (and normalises by the larger area).
+# Area-change limits (SuperSegger's DA_MIN / DA_MAX). A normalised area change
+# outside [da_min, da_max] flags a linking error, and the division and merge
+# tests require the change of the two pieces together to lie inside.
 da_max = 0.3
-
-# Minimum normalised area change. Negative = shrinkage allowed.
-# Same value as SuperSegger's DA_MIN; see da_max.
 da_min = -0.2
-
-# Discard regions with area below this threshold (pixels).
-# Value from SuperSegger's MIN_AREA, which has no effect there (its size
-# filter, trackOptiStripSmall, is disabled).
-min_area = 8
-
-# Discard isolated regions below this area. A region counts as isolated if no
-# other region's bounding box lies within 1 px of its bounding box.
-# Value from SuperSegger's MIN_AREA_NO_NEIGH, which has no effect there.
-min_area_no_neigh = 30
 
 # When a cell splits into two pieces and one of them is smaller than this area
 # (pixels), the pieces are merged back into one cell instead of recording a
 # division, if they touch (one region after a 3x3 closing) and their combined
-# area change is within [da_min, da_max]. Follows SuperSegger's
-# SMALL_AREA_MERGE rule, with the same value.
+# area change is within [da_min, da_max] (SuperSegger's SMALL_AREA_MERGE). A
+# previous cell this large or larger that disappears into a neighbour is split
+# off again.
 fragment_merge_area = 50
 
-# If true, drop tracks that appear after the first frame without a predecessor
-# and last only one frame (stray detections); they get no cell file.
-# Corresponds to SuperSegger's REMOVE_STRAY. 100XEc.mat sets it to 1, but
-# SuperSegger's loadConstants doesn't copy it, so SuperSegger runs with it off.
-drop_single_frame_strays = true
+# If true, delete regions with no predecessor and no successor (one-frame
+# strays); they get no cell file. SuperSegger's REMOVE_STRAY; 100XEc.mat sets
+# it to 1, but SuperSegger's loadConstants doesn't copy it, so SuperSegger
+# runs with it off.
+drop_single_frame_strays = false
 
-# Minimum number of observed frames for a cell cycle to count as complete
-# (Cell vs cell filename capitalisation). 6 matches SuperSegger's
-# MIN_CELL_AGE = 5, which counts frames after birth. A track born during the
-# movie can't divide before min_division_age frames, so this setting only has
-# an effect if it is larger than min_division_age.
-min_cycle_frames = 6
+# Minimum number of frames, birth and division frame included, for a cell
+# cycle to count as complete (Cell vs cell filename capitalisation).
+# SuperSegger's MIN_CELL_AGE + 1 (the superSeggerGui default is 3).
+min_cycle_frames = 4
 
-# Maximum centroid distance (pixels) for the fallback linker. Used only when a
-# cell has no candidate with IoU >= min_link_iou; it cannot recover a
-# second daughter if the first one overlaps the mother.
-# Not present in SuperSegger; set conservatively.
-search_radius = 15
-
-# Minimum age (frames) a track must reach before a split is accepted as a
-# division; earlier splits are treated as segmentation flicker and the pieces
-# are re-joined under the mother's identity. Tracks present in the first frame
-# are exempt (their birth was not observed). Depends on frame interval:
-# 8 frames suits ~1 min/frame with a 20-30 min doubling time.
-# Not present in SuperSegger.
-min_division_age = 8
-
-# Minimum area ratio (smaller / larger) between the two pieces for a split to
-# be accepted as a division; unequal splits are re-joined like young ones.
-# Not present in SuperSegger.
-min_sister_ratio = 0.5
-
-# IoU at or above which a link is accepted regardless of da_min / da_max.
-# The da limits then only gate ambiguous (low-overlap or centroid) links.
-# Not present in SuperSegger.
-confident_iou = 0.3
+# A split whose pieces fuse again within this many frames is merged back
+# (segmentation flicker) instead of being called a division. SuperSegger
+# looks one frame ahead (1).
+division_lookahead = 3

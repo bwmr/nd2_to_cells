@@ -1,21 +1,21 @@
-"""IoU-based cell tracker: links Omnipose masks across frames, writes cell*.h5.
+"""Cell tracker: links Omnipose masks across frames, writes cell*.h5.
 
-Algorithm (per xy position):
-    1. Enumerate mask file paths sorted by frame number (never load all at once).
-    2. Stream frame pairs: load frame t and t+1, extract region properties,
-       apply area filters, link (merging pieces of one cell where needed),
-       then discard t.
-    3. Single pass over the masks, replaying the merges made during linking,
-       filling crop buffers for all tracks; then write HDF5 output.
+The linking follows SuperSegger/OmniSegger's trackOpti steps 3-10, restricted
+to what determines lineages, with changes that reduce merged cells (see
+docs/linking.md):
+    1. trackOptiLinkCellMulti: frame-to-frame assignment (assign.py), error
+       resolution with mask merges and splits, re-running a frame after each
+       mask edit (link.py, mask_edit.py).
+    2. trackOptiCellMarker: complete cell cycles (stat0 = 2).
+    3. trackOptiCellFiles: one HDF5 file per cell ID; lineage fields from the
+       cell's last frame; Cell{ID} when that frame has stat0 = 2.
+Fluorescence, cell geometry, foci and clist are not computed.
 
-Memory design: linking holds at most 2 full labeled frames in RAM. Writing
-holds one frame plus crop buffers for all tracks until the end, so memory
-grows with movie length x cell count.
-Region objects store only scalars (label, area, centroid, bbox) — no arrays.
-IoU is computed on the fly from label equality within the bbox overlap region.
-
-Derived from ObtrackerPy (https://github.com/alexSysBio/ObtrackerPy) with extensions
-for division detection, area filtering, and HDF5 output.
+Memory design: linking holds the previous, current and next labeled frames
+plus division_lookahead - 1 look-ahead frames (5 frames with the presets),
+and scalar region tables for all frames; edited masks are kept compressed.
+Writing holds one frame plus crop buffers for all tracks until the end, so
+memory grows with movie length x cell count.
 """
 
 import re
@@ -27,9 +27,9 @@ from pathlib import Path
 import h5py
 import imageio.v3 as iio
 import numpy as np
-from scipy import ndimage
-from skimage.measure import regionprops
 from tqdm import tqdm
+
+from nd2_to_cells.link import Frame, cell_marker, link_frames
 
 # ---------------------------------------------------------------------------
 # Preset loading
@@ -40,23 +40,21 @@ _PRESET_DIR = Path(__file__).parent.parent / "presets"
 
 @dataclass
 class TrackingParams:
-    min_link_iou: float = 0.08
-    da_max: float = 0.3
-    da_min: float = -0.2
-    min_area: int = 8
-    min_area_no_neigh: int = 30
-    fragment_merge_area: int = 50
-    drop_single_frame_strays: bool = False
-    min_cycle_frames: int = 6
-    search_radius: float = 15.0
-    min_division_age: int = 8
-    min_sister_ratio: float = 0.5
-    confident_iou: float = 0.3
+    """Linking parameters; SuperSegger's CONST.trackOpti names in comments."""
+
+    da_max: float = 0.3  # DA_MAX
+    da_min: float = -0.2  # DA_MIN
+    fragment_merge_area: int = 50  # SMALL_AREA_MERGE
+    drop_single_frame_strays: bool = False  # REMOVE_STRAY
+    min_cycle_frames: int = 4  # MIN_CELL_AGE + 1
+    # Not in SuperSegger (1 there): a split whose pieces fuse again within
+    # this many frames is merged instead of called a division.
+    division_lookahead: int = 3
 
 
-# Old preset keys (SuperSegger names) still accepted; values carry over as-is.
+# Preset keys of earlier versions, still accepted; values carry over as-is
+# (the earlier min_cell_age counted frames, as min_cycle_frames does).
 _DEPRECATED_KEYS = {
-    "overlap_limit_min": "min_link_iou",
     "small_area_merge": "fragment_merge_area",
     "remove_stray": "drop_single_frame_strays",
     "min_cell_age": "min_cycle_frames",
@@ -128,410 +126,57 @@ def _load_mask(path: Path) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Region properties — scalars only, no full-frame arrays
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class Region:
-    label: int
-    area: int
-    centroid: tuple[float, float]  # (row, col)
-    bbox: tuple[int, int, int, int]  # (min_row, min_col, max_row, max_col)
-    # No mask field — computed on demand from the labeled array
-
-
-def _extract_regions(labeled: np.ndarray, params: TrackingParams) -> list[Region]:
-    """Extract region scalars from a labeled mask, applying min_area filter."""
-    regions = []
-    for prop in regionprops(labeled):
-        if prop.area < params.min_area:
-            continue
-        regions.append(
-            Region(
-                label=prop.label,
-                area=prop.area,
-                centroid=(prop.centroid[0], prop.centroid[1]),
-                bbox=prop.bbox,
-            )
-        )
-    return regions
-
-
-def _bboxes_overlap(b1: tuple, b2: tuple) -> bool:
-    """True if two (min_r, min_c, max_r, max_c) bboxes have any overlap."""
-    return b1[0] < b2[2] and b2[0] < b1[2] and b1[1] < b2[3] and b2[1] < b1[3]
-
-
-def _bbox_intersect(b1: tuple, b2: tuple) -> tuple[int, int, int, int] | None:
-    """Return the intersection bbox, or None if they don't overlap."""
-    r0 = max(b1[0], b2[0])
-    c0 = max(b1[1], b2[1])
-    r1 = min(b1[2], b2[2])
-    c1 = min(b1[3], b2[3])
-    if r1 <= r0 or c1 <= c0:
-        return None
-    return (r0, c0, r1, c1)
-
-
-def _iou_from_labeled(
-    labeled_a: np.ndarray,
-    label_a: int,
-    bbox_a: tuple,
-    area_a: int,
-    labeled_b: np.ndarray,
-    label_b: int,
-    bbox_b: tuple,
-    area_b: int,
-) -> float:
-    """Compute IoU using only the bbox overlap region — no full-frame arrays."""
-    inter_bbox = _bbox_intersect(bbox_a, bbox_b)
-    if inter_bbox is None:
-        return 0.0
-    r0, c0, r1, c1 = inter_bbox
-    patch_a = labeled_a[r0:r1, c0:c1] == label_a
-    patch_b = labeled_b[r0:r1, c0:c1] == label_b
-    inter = int(np.count_nonzero(patch_a & patch_b))
-    if inter == 0:
-        return 0.0
-    # Union = area_a + area_b - inter  (faster than materialising full union)
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
-
-
-# ---------------------------------------------------------------------------
-# Per-frame filtering and merging (operates on one labeled frame at a time)
-# ---------------------------------------------------------------------------
-
-
-def _has_neighbour(region: Region, all_regions: list[Region]) -> bool:
-    """Return True if region has any spatially adjacent neighbour.
-
-    Uses only bbox proximity — no full-frame arrays.
-    Two regions are considered adjacent if their bboxes are within 1px.
-    """
-    r0, c0, r1, c1 = region.bbox
-    for other in all_regions:
-        if other.label == region.label:
-            continue
-        or0, oc0, or1, oc1 = other.bbox
-        if r1 < or0 - 1 or or1 < r0 - 1 or c1 < oc0 - 1 or oc1 < c0 - 1:
-            continue
-        return True
-    return False
-
-
-def _apply_area_filters(
-    regions: list[Region],
-    params: TrackingParams,
-) -> list[Region]:
-    """Discard isolated regions smaller than min_area_no_neigh."""
-    return [
-        r
-        for r in regions
-        if r.area >= params.min_area_no_neigh or _has_neighbour(r, regions)
-    ]
-
-
-def _load_clean_frame(
-    path: Path, params: TrackingParams
-) -> tuple[np.ndarray, list[Region]]:
-    """Load one mask and apply area filters."""
-    labeled = _load_mask(path)
-    return labeled, _apply_area_filters(_extract_regions(labeled, params), params)
-
-
-# ---------------------------------------------------------------------------
-# Track data structure
+# Tracks from the linked frames (trackOptiCellFiles semantics)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class Track:
     track_id: int
-    frames: list[int] = field(default_factory=list)
-    labels: list[int] = field(default_factory=list)
-    bboxes: list[tuple] = field(default_factory=list)
-    areas: list[int] = field(default_factory=list)
+    frames: list[int] = field(default_factory=list)  # 0-based absolute frames
+    labels: list[int] = field(default_factory=list)  # region label per frame
+    bboxes: list[tuple] = field(default_factory=list)  # (r0, c0, r1, c1)
+    birth: int = 0  # 1-based frame number
+    death: int = 0  # 1-based frame number
     mother_id: int = 0
     sister_id: int = 0
     daughter_ids: list[int] = field(default_factory=list)
     divide: bool = False
-    has_predecessor: bool = False
+    stat0: int = 0  # 2 = complete cell cycle
 
 
-# ---------------------------------------------------------------------------
-# Streaming linker — loads one frame pair at a time
-# ---------------------------------------------------------------------------
+def _build_tracks(states: list[Frame], frames: list[int]) -> dict[int, Track]:
+    """One track per cell ID; lineage fields come from the ID's last frame.
 
-
-def _normalised_area_change(area_t: int, area_t1: int) -> float:
-    if area_t1 == 0:
-        return 0.0
-    return (area_t1 - area_t) / area_t1
-
-
-def _merge_region_pair(labeled: np.ndarray, keep: Region, drop: Region) -> Region:
-    """Relabel ``drop`` as ``keep`` in place and return the combined Region."""
-    labeled[labeled == drop.label] = keep.label
-    area = keep.area + drop.area
-    return Region(
-        label=keep.label,
-        area=area,
-        centroid=(
-            (keep.centroid[0] * keep.area + drop.centroid[0] * drop.area) / area,
-            (keep.centroid[1] * keep.area + drop.centroid[1] * drop.area) / area,
-        ),
-        bbox=_union_bbox([keep.bbox, drop.bbox]),
-    )
-
-
-def _closes_to_one_region(labeled: np.ndarray, a: Region, b: Region) -> bool:
-    """True if ``a`` and ``b`` form one region after a 3x3 closing.
-
-    Same test as OmniSegger's merge2Regions (imdilate + imerode with a 3x3
-    square, then 8-connected bwlabel), on the union bbox plus a 2 px margin.
-    """
-    r0, c0, r1, c1 = _union_bbox([a.bbox, b.bbox])
-    H, W = labeled.shape
-    crop = labeled[max(r0 - 2, 0) : min(r1 + 2, H), max(c0 - 2, 0) : min(c1 + 2, W)]
-    square = np.ones((3, 3), dtype=bool)
-    closed = ndimage.binary_erosion(
-        ndimage.binary_dilation((crop == a.label) | (crop == b.label), square),
-        square,
-        border_value=1,  # like imerode, outside the image counts as foreground
-    )
-    return ndimage.label(closed, square)[1] == 1
-
-
-def link_frames_streaming(
-    mask_paths: list[tuple[int, Path]],
-    params: TrackingParams,
-) -> tuple[dict[int, Track], dict[int, dict[int, int]]]:
-    """Link regions across all frames, loading only two frames at a time.
-
-    Args:
-        mask_paths: List of (0-based-frame-index, path) sorted by frame.
-        params:     Tracking parameters.
-
-    Returns:
-        (tracks, merges): dict mapping track_id -> Track (scalars only, no
-        arrays), and dict mapping frame -> {old_label: kept_label} for every
-        region merge applied to that frame's labeled mask during linking.
+    ``frames[i]`` is the 0-based absolute frame of file i. SuperSegger's birth
+    is a file index; it is converted to a 1-based frame number. Not
+    SuperSegger: labels without pixels (ghosts) are skipped, and death is the
+    cell's last frame (SuperSegger's field can be one frame later).
     """
     tracks: dict[int, Track] = {}
-    merges: dict[int, dict[int, int]] = {}
-    next_id = 1
-    active: dict[int, int] = {}  # label_in_current_frame -> track_id
-
-    n_frames = len(mask_paths)
-
-    # Load first frame
-    frame_0, path_0 = mask_paths[0]
-    labeled_prev, regions_prev = _load_clean_frame(path_0, params)
-
-    # Initialise tracks for first frame
-    for r in regions_prev:
-        tid = next_id
-        next_id += 1
-        tracks[tid] = Track(
-            track_id=tid,
-            frames=[frame_0],
-            labels=[r.label],
-            bboxes=[r.bbox],
-            areas=[r.area],
-            has_predecessor=False,
-        )
-        active[r.label] = tid
-
-    for fi in range(1, n_frames):
-        frame_cur, path_cur = mask_paths[fi]
-        frame_merges = merges.setdefault(frame_cur, {})
-        labeled_cur, regions_cur = _load_clean_frame(path_cur, params)
-
-        claimed: set[int] = set()
-        new_active: dict[int, int] = {}
-
-        def _continue(tid: int, r1: Region) -> None:
-            tracks[tid].frames.append(frame_cur)
-            tracks[tid].labels.append(r1.label)
-            tracks[tid].bboxes.append(r1.bbox)
-            tracks[tid].areas.append(r1.area)
-            new_active[r1.label] = tid
-            claimed.add(r1.label)
-
-        def _accept_link(r0: Region, r1: Region, iou: float) -> bool:
-            # A confident overlap is the same cell even if segmentation
-            # changed its area a lot; da limits only gate ambiguous links.
-            if iou >= params.confident_iou:
-                return True
-            da = _normalised_area_change(r0.area, r1.area)
-            return params.da_min <= da <= params.da_max
-
-        for r0 in regions_prev:
-            tid = active.get(r0.label)
-            if tid is None:
+    for i, fr in enumerate(states):
+        for k in range(1, fr.num_regs + 1):
+            if not fr.area[k]:
                 continue
-
-            candidates_iou = []
-            candidates_fallback = []
-
-            for r1 in regions_cur:
-                if r1.label in claimed:
-                    continue
-
-                if _bboxes_overlap(r0.bbox, r1.bbox):
-                    iou = _iou_from_labeled(
-                        labeled_prev,
-                        r0.label,
-                        r0.bbox,
-                        r0.area,
-                        labeled_cur,
-                        r1.label,
-                        r1.bbox,
-                        r1.area,
-                    )
-                    if iou >= params.min_link_iou:
-                        candidates_iou.append((iou, r1))
-                        continue
-
-                # Centroid-distance fallback
-                dist = np.hypot(
-                    r1.centroid[0] - r0.centroid[0],
-                    r1.centroid[1] - r0.centroid[1],
-                )
-                if dist <= params.search_radius:
-                    candidates_fallback.append((dist, r1))
-
-            # Prefer IoU candidates (sort best-first); fall back to centroid.
-            # Candidates are (iou, region); fallback candidates have iou 0.
-            if candidates_iou:
-                candidates = sorted(
-                    candidates_iou, key=lambda x: -x[0]
-                )  # highest IoU first
-            elif candidates_fallback:
-                candidates = [
-                    (0.0, r1)
-                    for _, r1 in sorted(candidates_fallback, key=lambda x: x[0])
-                ]
-            else:
-                candidates = []
-
-            if len(candidates) == 0:
-                pass  # track ends naturally
-
-            elif len(candidates) == 1:
-                iou, r1 = candidates[0]
-                if _accept_link(r0, r1, iou):
-                    _continue(tid, r1)
-                # else: track ends (area change too extreme, not a continuation)
-
-            else:
-                # Check top 2 for division first (before per-candidate da filter)
-                _, r1a = candidates[0]
-                _, r1b = candidates[1]
-                combined = r1a.area + r1b.area
-                da_div = _normalised_area_change(r0.area, combined)
-                area_fits = params.da_min <= da_div <= params.da_max
-
-                # A real division needs a mother old enough to have completed a
-                # cycle (unless born before the movie started) and similar-sized
-                # sisters; otherwise the split is segmentation flicker.
-                mother = tracks[tid]
-                old_enough = (
-                    mother.frames[0] == frame_0
-                    or len(mother.frames) >= params.min_division_age
-                )
-                sisters_similar = (
-                    min(r1a.area, r1b.area) / max(r1a.area, r1b.area)
-                    >= params.min_sister_ratio
-                )
-                # As in OmniSegger, a piece below fragment_merge_area is merged
-                # into its sister instead of becoming a daughter, if the two
-                # pieces close into one region.
-                small_piece = (
-                    area_fits
-                    and min(r1a.area, r1b.area) < params.fragment_merge_area
-                    and _closes_to_one_region(labeled_cur, r1a, r1b)
-                )
-
-                if area_fits and old_enough and sisters_similar and not small_piece:
-                    tracks[tid].divide = True
-                    tid_a = next_id
-                    next_id += 1
-                    tid_b = next_id
-                    next_id += 1
-                    tracks[tid].daughter_ids = [tid_a, tid_b]
-
-                    for tid_d, r1_d in [(tid_a, r1a), (tid_b, r1b)]:
-                        tracks[tid_d] = Track(
-                            track_id=tid_d,
-                            frames=[frame_cur],
-                            labels=[r1_d.label],
-                            bboxes=[r1_d.bbox],
-                            areas=[r1_d.area],
-                            mother_id=tid,
-                            sister_id=tid_b if tid_d == tid_a else tid_a,
-                            has_predecessor=True,
-                        )
-                        new_active[r1_d.label] = tid_d
-                        claimed.add(r1_d.label)
-                elif small_piece or (area_fits and candidates_iou):
-                    # Small piece, or rejected division of two overlapping
-                    # pieces: re-join them and keep the mother's identity.
-                    merged = _merge_region_pair(labeled_cur, r1a, r1b)
-                    frame_merges[r1b.label] = r1a.label
-                    regions_cur = [
-                        merged if r.label == r1a.label else r
-                        for r in regions_cur
-                        if r.label != r1b.label
-                    ]
-                    _continue(tid, merged)
-                else:
-                    # Not a division — link to best candidate that passes da filter
-                    for iou, r1 in candidates:
-                        if _accept_link(r0, r1, iou):
-                            _continue(tid, r1)
-                            break
-
-        # New regions with no predecessor
-        for r1 in regions_cur:
-            if r1.label in claimed:
-                continue
-            tid = next_id
-            next_id += 1
-            tracks[tid] = Track(
-                track_id=tid,
-                frames=[frame_cur],
-                labels=[r1.label],
-                bboxes=[r1.bbox],
-                areas=[r1.area],
-                has_predecessor=False,
-            )
-            new_active[r1.label] = tid
-
-        # Advance: current becomes previous, discard previous labeled array
-        labeled_prev = labeled_cur
-        regions_prev = regions_cur
-        active = new_active
-        # labeled_prev now holds the only frame in memory
-
-    # Remove stray single-frame tracks with no predecessor and no daughters.
-    # As in OmniSegger, cells in the first frame are kept: the movie starts
-    # there, so they can't have a predecessor.
-    if params.drop_single_frame_strays:
-        tracks = {
-            tid: t
-            for tid, t in tracks.items()
-            if not (
-                not t.has_predecessor
-                and len(t.frames) == 1
-                and not t.divide
-                and t.frames[0] != frame_0
-            )
-        }
-
-    return tracks, merges
+            cid = int(fr.ID[k])
+            track = tracks.setdefault(cid, Track(track_id=cid))
+            if track.frames and track.frames[-1] == frames[i]:
+                raise RuntimeError(f"cell {cid} appears twice in frame {frames[i] + 1}")
+            x0, y0, w, h = fr.bbox[k]
+            r0, c0 = int(round(y0 - 0.5)), int(round(x0 - 0.5))
+            track.frames.append(frames[i])
+            track.labels.append(k)
+            track.bboxes.append((r0, c0, r0 + int(h), c0 + int(w)))
+            # intUpCell: every frame overwrites the lineage fields.
+            track.birth = frames[int(fr.birth[k]) - 1] + 1
+            track.divide = bool(fr.divide[k])
+            track.mother_id = int(fr.motherID[k])
+            track.sister_id = int(fr.sisterID[k])
+            track.daughter_ids = [int(x) for x in fr.daughterID[k]]
+            track.stat0 = int(fr.stat0[k])
+    for track in tracks.values():
+        track.death = track.frames[-1] + 1
+    return tracks
 
 
 # ---------------------------------------------------------------------------
@@ -626,13 +271,13 @@ def _fill_buffers(
     mask_paths: list[tuple[int, Path]],
     tracks: dict[int, "Track"],
     buffers: dict[int, dict],
-    merges: dict[int, dict[int, int]],
+    states: list[Frame],
 ) -> None:
-    """Single pass over mask PNGs: load each frame once, fill all active crops.
+    """Single pass over the masks: load each frame once, fill all active crops.
 
     Builds the frame -> [track_id] inverted index internally so the caller
-    doesn't need to manage it. Region merges made during linking are replayed
-    on each frame (in the order they were made) before cropping.
+    doesn't need to manage it. Frames whose mask was edited during linking
+    (merges, splits) use the edited mask; the others are read from masks/.
     """
     from collections import defaultdict
 
@@ -643,13 +288,13 @@ def _fill_buffers(
         for f in track.frames:
             frame_to_tids[f].append(tid)
 
-    for abs_frame, path in mask_paths:
+    for (abs_frame, path), state in zip(mask_paths, states):
         tids = frame_to_tids.get(abs_frame)
         if not tids:
             continue
-        labeled = _load_mask(path)
-        for old, kept in merges.get(abs_frame, {}).items():
-            labeled[labeled == old] = kept
+        labeled = state.edited_labels()
+        if labeled is None:
+            labeled = _load_mask(path)
         for tid in tids:
             track = tracks[tid]
             buf = buffers[tid]
@@ -660,24 +305,10 @@ def _fill_buffers(
         del labeled
 
 
-def _is_complete(track: "Track", params: TrackingParams) -> bool:
-    """Complete cell cycle: born from an observed division, divides, long enough.
-
-    A track born during the movie can't divide before min_division_age frames,
-    so min_cycle_frames only has an effect if it is larger than that.
-    """
-    return (
-        track.mother_id != 0
-        and track.divide
-        and len(track.frames) >= params.min_cycle_frames
-    )
-
-
 def _flush_all_tracks_to_h5(
     cell_dir: Path,
     tracks: dict[int, "Track"],
     buffers: dict[int, dict],
-    params: TrackingParams,
 ) -> None:
     """Write all tracks as groups into a single cells.h5 file."""
     with h5py.File(cell_dir / "cells.h5", "w") as h5:
@@ -685,10 +316,10 @@ def _flush_all_tracks_to_h5(
             if track.track_id not in buffers:
                 continue
             buf = buffers[track.track_id]
-            prefix = "Cell" if _is_complete(track, params) else "cell"
+            prefix = "Cell" if track.stat0 == 2 else "cell"
             grp = h5.require_group(f"{prefix}{track.track_id:07d}")
-            grp.create_dataset("birth", data=np.int64(track.frames[0] + 1))
-            grp.create_dataset("death", data=np.int64(track.frames[-1] + 1))
+            grp.create_dataset("birth", data=np.int64(track.birth))
+            grp.create_dataset("death", data=np.int64(track.death))
             grp.create_dataset("divide", data=np.int8(1 if track.divide else 0))
             grp.create_dataset("motherID", data=np.int64(track.mother_id))
             grp.create_dataset("sisterID", data=np.int64(track.sister_id))
@@ -708,15 +339,14 @@ def _flush_track_to_h5(
     cell_dir: Path,
     track: "Track",
     buf: dict,
-    params: TrackingParams,
 ) -> None:
     """Write one HDF5 file from a pre-filled buffer dict."""
-    prefix = "Cell" if _is_complete(track, params) else "cell"
+    prefix = "Cell" if track.stat0 == 2 else "cell"
     fname = f"{prefix}{track.track_id:07d}.h5"
 
     with h5py.File(cell_dir / fname, "w") as h5:
-        h5.create_dataset("birth", data=np.int64(track.frames[0] + 1))
-        h5.create_dataset("death", data=np.int64(track.frames[-1] + 1))
+        h5.create_dataset("birth", data=np.int64(track.birth))
+        h5.create_dataset("death", data=np.int64(track.death))
         h5.create_dataset("divide", data=np.int8(1 if track.divide else 0))
         h5.create_dataset("motherID", data=np.int64(track.mother_id))
         h5.create_dataset("sisterID", data=np.int64(track.sister_id))
@@ -738,16 +368,24 @@ def _flush_track_to_h5(
 
 
 def _track_position(
-    xy_dir: Path, params: TrackingParams, pad: int, consolidated: bool = False
-) -> None:
-    """Run the full tracking pipeline for one xy position."""
+    xy_dir: Path,
+    params: TrackingParams,
+    pad: int,
+    consolidated: bool = False,
+    frame_bar: bool = False,
+) -> int | None:
+    """Run the full tracking pipeline for one xy position.
+
+    Returns the number of tracks written, or None if the position is skipped.
+    ``frame_bar`` shows a progress bar over the frames (single-process runs).
+    """
     masks_dir = xy_dir / "masks"
     cell_dir = xy_dir / "cell"
     cell_dir.mkdir(exist_ok=True)
 
     if not masks_dir.exists():
-        print(f"  [skip] {xy_dir.name}: no masks/ directory")
-        return
+        tqdm.write(f"  [skip] {xy_dir.name}: no masks/ directory")
+        return None
 
     # Remove the cp_output directory Omnipose creates as a CLI artefact
     cp_output_dir = xy_dir / "cp_output"
@@ -759,19 +397,19 @@ def _track_position(
     try:
         mask_paths = _enumerate_mask_paths(masks_dir)
     except FileNotFoundError as e:
-        print(f"  [skip] {xy_dir.name}: {e}")
-        return
+        tqdm.write(f"  [skip] {xy_dir.name}: {e}")
+        return None
 
     if not mask_paths:
-        print(f"  [skip] {xy_dir.name}: empty masks/ directory")
-        return
+        tqdm.write(f"  [skip] {xy_dir.name}: empty masks/ directory")
+        return None
 
     # Missing frames are bridged by the linker; warn since links are less reliable
     frames = {f for f, _ in mask_paths}
     missing = [f + 1 for f in range(min(frames), max(frames)) if f not in frames]
     if missing:
         shown = ", ".join(map(str, missing[:10])) + (" …" if len(missing) > 10 else "")
-        print(
+        tqdm.write(
             f"  [warn] {xy_dir.name}: {len(missing)} frame(s) missing from masks/ "
             f"(t = {shown}); tracks are linked across the gap(s)"
         )
@@ -781,7 +419,7 @@ def _track_position(
     if phase_tifs and max(f.stat().st_mtime for f in phase_tifs) > min(
         p.stat().st_mtime for _, p in mask_paths
     ):
-        print(
+        tqdm.write(
             f"  [warn] {xy_dir.name}: phase/ images are newer than masks/ — "
             "masks may be out of date (re-run Omnipose?)"
         )
@@ -789,12 +427,25 @@ def _track_position(
     # Image shape from first frame only
     img_shape = _load_mask(mask_paths[0][1]).shape[:2]
 
-    print(f"  {xy_dir.name}: linking {len(mask_paths)} frames...")
-    tracks, merges = link_frames_streaming(mask_paths, params)
-    print(f"  {xy_dir.name}: {len(tracks)} tracks, writing HDF5 file(s)...")
+    with tqdm(
+        total=len(mask_paths),
+        desc=f"  {xy_dir.name}",
+        unit="frame",
+        leave=False,
+        disable=not frame_bar,
+    ) as bar:
+        states = link_frames(
+            lambda i: _load_mask(mask_paths[i][1]),
+            len(mask_paths),
+            params,
+            warn=lambda msg: tqdm.write(f"  [warn] {xy_dir.name}: {msg}"),
+            progress=lambda t: bar.update(),
+        )
+    cell_marker(states, params.min_cycle_frames)
+    tracks = _build_tracks(states, [f for f, _ in mask_paths])
 
     buffers = _alloc_track_buffers(tracks, img_shape, pad)
-    _fill_buffers(mask_paths, tracks, buffers, merges)
+    _fill_buffers(mask_paths, tracks, buffers, states)
 
     # Remove previous track output (both modes) so stale cells don't survive
     stale = [
@@ -804,29 +455,30 @@ def _track_position(
     ]
     for f in stale:
         f.unlink()
-    if stale:
-        print(f"  {xy_dir.name}: removed {len(stale)} previous cell file(s)")
 
     if consolidated:
-        _flush_all_tracks_to_h5(cell_dir, tracks, buffers, params)
+        _flush_all_tracks_to_h5(cell_dir, tracks, buffers)
     else:
         for track in tracks.values():
             if track.track_id in buffers:
-                _flush_track_to_h5(cell_dir, track, buffers[track.track_id], params)
+                _flush_track_to_h5(cell_dir, track, buffers[track.track_id])
+    return len(tracks)
 
 
-def _track_position_wrapper(args) -> str | None:
-    """Run one position; return an error message instead of raising."""
-    xy_dir, params, pad, consolidated = args
+def _track_position_wrapper(args) -> tuple[str, int | None, str | None]:
+    """Run one position; return (name, number of tracks, error message)."""
+    xy_dir, preset_str, pad, consolidated, frame_bar = args
+    name = Path(xy_dir).name
     try:
-        _track_position(Path(xy_dir), params, pad, consolidated)
+        params = load_preset(preset_str)
+        n_tracks = _track_position(Path(xy_dir), params, pad, consolidated, frame_bar)
     except Exception as exc:
         import traceback
 
         print(f"ERROR tracking {xy_dir}: {exc}")
         traceback.print_exc()
-        return f"{Path(xy_dir).name}: {exc}"
-    return None
+        return name, None, f"{name}: {exc}"
+    return name, n_tracks, None
 
 
 # ---------------------------------------------------------------------------
@@ -863,16 +515,18 @@ def run_track(
     params = load_preset(preset)
     print(
         f"Tracking {len(xy_dirs)} position(s) with preset '{preset}' "
-        f"(min_link_iou={params.min_link_iou}, "
-        f"da_min={params.da_min}, da_max={params.da_max}, "
-        f"drop_single_frame_strays={params.drop_single_frame_strays})"
+        f"(da_min={params.da_min}, da_max={params.da_max}, "
+        f"fragment_merge_area={params.fragment_merge_area}, "
+        f"drop_single_frame_strays={params.drop_single_frame_strays}, "
+        f"min_cycle_frames={params.min_cycle_frames}, "
+        f"division_lookahead={params.division_lookahead})"
     )
 
-    # Pass the loaded params (picklable) so preset warnings print only once.
-    args = [(str(d), params, pad, consolidated) for d in xy_dirs]
+    # One worker: also a bar over the frames of the current position.
+    args = [(str(d), preset, pad, consolidated, workers <= 1) for d in xy_dirs]
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            errors = list(
+            results = list(
                 tqdm(
                     pool.map(_track_position_wrapper, args),
                     total=len(args),
@@ -881,9 +535,15 @@ def run_track(
                 )
             )
     else:
-        errors = [_track_position_wrapper(a) for a in args]
+        results = [
+            _track_position_wrapper(a)
+            for a in tqdm(args, desc="Tracking positions", unit="pos")
+        ]
 
-    failed = [e for e in errors if e]
+    for name, n_tracks, _ in results:
+        if n_tracks is not None:
+            print(f"  {name}: {n_tracks} tracks")
+    failed = [e for _, _, e in results if e]
     if failed:
         raise RuntimeError(
             f"Tracking failed for {len(failed)}/{len(args)} position(s):\n  "

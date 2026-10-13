@@ -15,8 +15,7 @@ match commit `254d081`.
 > it as *inferred* and says how to check it on real output.
 >
 > On 2026-10-08 every claim was checked again against the source at
-> `254d081`, and the corrections are folded in below. The list of what changed
-> is in [`linking_comparison.md`](linking_comparison.md) §5.
+> `254d081`, and the corrections are folded in below.
 
 ---
 
@@ -639,11 +638,3 @@ runs: `REMOVE_STRAY` is effectively 0, and no overlap threshold exists at all.
 13. **Label collisions** (*inferred*, §6 `merge2Regions`). Two edits in one
     pass can write the same new label, so two disjoint blobs share one ID.
 14. **One-frame cells have two `CellA` entries** (§7.6).
-
----
-
-## 10. Comparison with `nd2_to_cells/track.py`
-
-Moved to [`linking_comparison.md`](linking_comparison.md). That file compares
-the current linker stage by stage, classifies each divergence, and lists
-corrections to this document found when checking it against the source.

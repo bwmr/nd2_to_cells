@@ -83,7 +83,7 @@ Caveats for the Z-stack workflow:
     masks/                   Omnipose PNG masks (populated by step 3)
     cell/                    HDF5 output (populated by step 4)
       cell0000001.h5         one file per tracked cell (default)
-      Cell0000002.h5         capital C = complete cell cycle (birth + division)
+      Cell0000002.h5         capital C = complete cell cycle (SuperSegger stat0 = 2)
       ...                    or, with --consolidated:
       cells.h5               single file; one group per cell
   xy02/ ...
@@ -133,6 +133,15 @@ per-slice TIFFs produced by `export --export-z-slices` and writes one
 replaced; `masks/` is never modified. A warning is printed if `phase/` images
 are newer than the masks.
 
+The linking follows SuperSegger/OmniSegger's `trackOpti` (linking with mask
+merges and splits, complete-cycle marking, cell files), limited to what
+determines lineages; fluorescence statistics, cell geometry, foci and `clist`
+are not computed. Seven changes reduce cells that merge with their sister or
+a neighbour: on the 260429 test data, A + B merges drop from 2658 to 852,
+against 2104 for the IoU linker this code replaced. Merges and splits are
+applied to the masks written into the HDF5 crops. See `docs/linking.md` for
+what is ported, what changes and why, and the tests.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--data DIR` | required | Experiment directory containing `xy*/`. |
@@ -141,14 +150,23 @@ are newer than the masks.
 | `--consolidated` | off | Write one `cells.h5` per position (one group per cell) instead of one file per cell. |
 | `--workers N` | `1` | Number of parallel worker processes (one per xy position). |
 
-Division and linking checks are set in the preset (not SuperSegger parameters;
-both bundled presets use the defaults below):
+Linking parameters are set in the preset. Except for `division_lookahead`,
+they are SuperSegger's `CONST.trackOpti` values as a `superSeggerGui` run
+uses them:
 
-| Preset key | Default | Description |
-|------------|---------|-------------|
-| `min_division_age` | `8` | Minimum track age (frames) before a split counts as a division. Earlier splits are treated as segmentation flicker and the pieces are re-joined under the mother's identity. Tracks present in the first frame are exempt. Depends on the frame interval. |
-| `min_sister_ratio` | `0.5` | Minimum area ratio (smaller / larger) of the two pieces for a split to count as a division; unequal splits are re-joined. |
-| `confident_iou` | `0.3` | IoU at or above which a link is accepted regardless of `da_min` / `da_max`; the area-change limits then gate only low-overlap or centroid-fallback links. |
+| Preset key | 100XEc | SuperSegger | Description |
+|------------|--------|-------------|-------------|
+| `da_min`, `da_max` | `-0.2`, `0.3` | `DA_MIN`, `DA_MAX` | Normalised area-change limits: outside them a link is flagged as an error, and divisions and merges need a change inside them. |
+| `fragment_merge_area` | `50` (Pa: `30`) | `SMALL_AREA_MERGE` | The two pieces of a split are merged back if either is smaller than this (pixels), among other conditions. A previous cell at least this large that disappears into a neighbour is split off again. |
+| `drop_single_frame_strays` | `false` | `REMOVE_STRAY` | Delete regions with no predecessor and no successor. |
+| `min_cycle_frames` | `4` | `MIN_CELL_AGE` + 1 | A complete cycle (`Cell{ID}.h5`) spans at least this many frames, birth and division frame included (GUI default 3 + 1). |
+| `division_lookahead` | `3` | — (1) | A split whose pieces fuse again within this many frames is merged back instead of called a division. |
+
+Presets that use the earlier key names still load, with a warning naming the
+new key: `small_area_merge` → `fragment_merge_area`, `remove_stray` →
+`drop_single_frame_strays`, `min_cell_age` → `min_cycle_frames`. Values carry
+over unchanged. Unknown keys, such as those of the IoU linker, are ignored
+with a warning.
 
 ## HDF5 cell file layout
 
@@ -161,9 +179,9 @@ Each cell contains:
 
 | Dataset    | Type        | Shape    | Description                                |
 |------------|-------------|----------|--------------------------------------------|
-| `birth`    | int64       | scalar   | 1-based frame of first appearance          |
-| `death`    | int64       | scalar   | 1-based frame of last appearance           |
-| `divide`   | int8        | scalar   | 1 if division observed, 0 otherwise        |
+| `birth`    | int64       | scalar   | 1-based frame of birth (first appearance)  |
+| `death`    | int64       | scalar   | 1-based frame of death (last frame)        |
+| `divide`   | int8        | scalar   | 1 if the cell divides in its last frame    |
 | `motherID` | int64       | scalar   | Track ID of mother cell (0 = none)         |
 | `sisterID` | int64       | scalar   | Track ID of sister cell (0 = none)         |
 | `daughterID` | int64     | (0,) or (2,) | Track IDs of daughter cells           |
@@ -171,7 +189,7 @@ Each cell contains:
 | `BB`       | int32       | (T, 4)   | Per-frame cell bbox (unpadded), relative to crop top-left [x, y, w, h] |
 | `r_offset` | int32       | (T, 2)   | Top-left of padded crop in image [x, y] (same for all frames) |
 | `edgeFlag` | bool        | (T,)     | True if padded crop touches the image edge (same for all frames)¹ |
-| `mask`     | bool        | (H, W, T)| Binary Omnipose mask in consensus crop     |
+| `mask`     | bool        | (H, W, T)| Binary cell mask in consensus crop (after linking merges/splits) |
 
 ¹ After `align`, the image edge is the padded canvas edge, not where real
 pixels end.
@@ -183,21 +201,8 @@ Tracking parameters are stored in `presets/` as TOML files. Available presets:
 - `100XEc` — *E. coli*, 100x objective, 60 nm/px
 - `100XPa` — *P. aeruginosa*, 100x objective, 60 nm/px
 
-Some values are taken from the corresponding SuperSegger `.mat` preset files,
-but no key behaves exactly like its SuperSegger counterpart; the comments in
-`presets/100XEc.toml` say what each key does. `search_radius`,
-`min_division_age`, `min_sister_ratio` and `confident_iou` have no SuperSegger
-counterpart.
-
-`min_cycle_frames` (default `6`) is the number of observed frames a cycle
-needs to count as complete (`Cell*` files). A track born during the movie
-can't divide before `min_division_age` frames, so `min_cycle_frames` only has
-an effect if it is larger than `min_division_age`.
-
-Presets that use the earlier key names still load, with a warning naming the
-new key: `overlap_limit_min` → `min_link_iou`, `small_area_merge` →
-`fragment_merge_area`, `remove_stray` → `drop_single_frame_strays`,
-`min_cell_age` → `min_cycle_frames`. Values carry over unchanged. Unknown keys
-are ignored with a warning.
+Values are the effective SuperSegger settings of a `superSeggerGui` run with
+the corresponding `.mat` preset (some `.mat` values, e.g. `REMOVE_STRAY` in
+100XEc, are never used by SuperSegger), plus `division_lookahead`.
 Pass a preset name (`--preset 100XEc`, looked up in `presets/`) or a path to
 your own `.toml` (`--preset /path/to/custom.toml`).
