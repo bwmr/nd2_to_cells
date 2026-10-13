@@ -155,8 +155,7 @@ B merges without changing long clean tracks.
 
 ```bash
 pip install -e ".[dev]"
-pytest                                   # fast tests, a few seconds
-ND2C_TEST_DATA=".../amp_testing/01_SW5-20-1_2xMIC/260429" pytest   # + real data, ~4 min
+pytest                                   # about 2.5 min; no data needed
 ```
 
 The tests follow the downstream linking report of 2026-10-08
@@ -193,5 +192,7 @@ For whole positions: `python tests/merge_events.py <cell dir> ... [--csv events.
 | `test_scenarios.py` | synthetic movies: growth and division (controls), daughters that fuse (A), neighbours that fuse (B), a small neighbour that fuses (B, change #5), a temporary split that must not become a division (#3), and one too wide to merge back (#4) |
 | `test_report_cases.py` | 10 real-data cases: one A and one B per position, plus the locations of the report's figures A and B. Each is a merge event of the SuperSegger-equivalent port, linked as a 13–18-frame window. Neither cell may absorb a track or be absorbed at t. |
 
-The real-data tests read the masks in place and write only to pytest's
-temporary directory.
+The real-data cases are stored in `tests/data/` as crops of the 260429
+masks (350 KB in all) and are put back into empty frames of the original
+size. In every crop, the SuperSegger-equivalent port still produces the
+case's merge.

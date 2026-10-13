@@ -1,6 +1,5 @@
 """Shared helper: run `nd2_to_cells track` (preset 100XEc) on a few frames."""
 
-import os
 from pathlib import Path
 
 import imageio.v3 as iio
@@ -15,9 +14,6 @@ if Path(nd2_to_cells.__file__).resolve().parents[1] != REPO:
     raise ImportError(
         f"nd2_to_cells is imported from {nd2_to_cells.__file__}, not from {REPO}"
     )
-
-# The 260429 experiment folder (with xy01 ... xy04), read-only.
-DATA = Path(os.environ["ND2C_TEST_DATA"]) if "ND2C_TEST_DATA" in os.environ else None
 
 
 def link(out_dir: Path, frames: dict[int, np.ndarray | Path]) -> dict[int, Track]:

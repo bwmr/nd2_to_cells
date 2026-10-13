@@ -5,24 +5,28 @@ frame t, the track holding point T absorbed the track holding point X. Both
 points are (y, x) in the full image and lie inside the two cells at t-1. Only
 the window of frames start ... t+2 is linked.
 
+The masks of each window are in tests/data/<case>.npz: the bounding box of
+the two points plus 128 px (512 px for xy03_A), relabelled per frame in label
+order, with its origin and the full frame shape. The test puts the crop back
+into empty frames of that shape, because SuperSegger's split registration
+depends on the frame size. So placed, every crop still makes the
+SuperSegger-equivalent port (commit a40b03e) produce the case's event.
+
 The test asks for the desired outcome: neither of the two cells absorbs a
 track, or is absorbed, at t. Alternatively one track holds both at t-1
 without having absorbed another track (a split not called a division).
-
-Needs ND2C_TEST_DATA, the 260429 folder (read only). Takes about 4 min.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 
+import numpy as np
 import pytest
 
-from tests.conftest import DATA, link
+from tests.conftest import link
 from tests.merge_events import Track, find_events
 
-pytestmark = [
-    pytest.mark.data,
-    pytest.mark.skipif(DATA is None, reason="ND2C_TEST_DATA is not set"),
-]
+FIXTURES = Path(__file__).parent / "data"
 
 
 @dataclass(frozen=True)
@@ -54,8 +58,15 @@ CASES = {
 
 def run_case(name: str, tmp_path) -> dict[int, Track]:
     case = CASES[name]
-    masks = sorted((DATA / case.pos / "masks").glob("*cp_masks.png"))
-    return link(tmp_path, {t: masks[t] for t in range(case.start, case.t + 3)})
+    with np.load(FIXTURES / f"{name}.npz") as d:
+        crops, (y0, x0), shape = d["masks"], d["origin"], tuple(d["shape"])
+    assert len(crops) == case.t + 3 - case.start
+    frames = {}
+    for t, crop in enumerate(crops, start=case.start):
+        frame = np.zeros(shape, np.uint16)
+        frame[y0 : y0 + crop.shape[0], x0 : x0 + crop.shape[1]] = crop
+        frames[t] = frame
+    return link(tmp_path, frames)
 
 
 def track_at(tracks: dict[int, Track], t: int, point: tuple[int, int]):

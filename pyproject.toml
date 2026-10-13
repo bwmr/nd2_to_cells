@@ -32,7 +32,6 @@ dev = ["ruff", "pytest"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-markers = ["data: needs the 260429 dataset (set ND2C_TEST_DATA)"]
 
 [tool.ruff]
 line-length = 88

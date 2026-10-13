@@ -43,12 +43,11 @@ ruff format nd2_to_cells/ tests/
 ## Tests
 
 ```bash
-pytest                                          # fast tests (seconds)
-ND2C_TEST_DATA=<260429 folder> pytest   # + real data, ~4 min
+pytest                                          # about 2.5 min; no data needed
 ```
 
 - The tests import `nd2_to_cells` from this checkout (`pythonpath` in `pyproject.toml`), and `tests/conftest.py` refuses to run against another copy, such as an editable install of the main checkout.
-- A linking change must keep all 10 real-data cases of `tests/test_report_cases.py` resolved. Count merge events on whole positions with `python tests/merge_events.py <cell dir> ...` and compare with `docs/linking.md`.
+- A linking change must keep all 10 real-data cases of `tests/test_report_cases.py` resolved (mask crops in `tests/data/`). Count merge events on whole positions with `python tests/merge_events.py <cell dir> ...` and compare with `docs/linking.md`.
 
 ## Pipeline commands (must run in order)
 
