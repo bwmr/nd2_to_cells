@@ -155,7 +155,9 @@ B merges without changing long clean tracks.
 
 ```bash
 pip install -e ".[dev]"
-pytest                                   # about 2.5 min; no data needed
+pytest            # fast tests, about 1 s
+pytest -m slow    # the 10 real-data report cases, about 2.5 min
+pytest -m ""      # all tests (run on pull requests)
 ```
 
 The tests follow the downstream linking report of 2026-10-08

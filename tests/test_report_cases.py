@@ -26,6 +26,8 @@ import pytest
 from tests.conftest import link
 from tests.merge_events import Track, find_events
 
+pytestmark = pytest.mark.slow
+
 FIXTURES = Path(__file__).parent / "data"
 
 

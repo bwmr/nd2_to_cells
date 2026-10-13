@@ -1,0 +1,24 @@
+# Lint and the fast tests before each commit. Set up once per clone:
+#   pip install -e ".[dev]" && pre-commit install
+# The hooks run in the active environment, so commit from the environment
+# that has the dev extras installed. The slow tests run on pull requests
+# (.github/workflows/tests.yml) or on demand with `pytest -m slow`.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]
+      - id: pytest-fast
+        name: pytest (fast tests)
+        entry: pytest -q
+        language: system
+        pass_filenames: false
+        always_run: true

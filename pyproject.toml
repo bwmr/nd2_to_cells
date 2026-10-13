@@ -27,11 +27,13 @@ dependencies = [
 nd2_to_cells = "nd2_to_cells.cli:cli"
 
 [project.optional-dependencies]
-dev = ["ruff", "pytest"]
+dev = ["ruff", "pytest", "pre-commit"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m 'not slow'"
+markers = ["slow: the real-data report cases, about 2.5 min (pytest -m slow)"]
 
 [tool.ruff]
 line-length = 88

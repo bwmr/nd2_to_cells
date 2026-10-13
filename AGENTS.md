@@ -22,13 +22,14 @@ presets/
   100XPa.toml      # P. aeruginosa defaults
 ```
 
-No CI. No Makefile. `tests/` holds pytest tests for the merge issues of the 260429 linking report (see `docs/linking.md`).
+No Makefile. `tests/` holds pytest tests for the merge issues of the 260429 linking report (see `docs/linking.md`). Pre-commit (`.pre-commit-config.yaml`) runs ruff and the fast tests before each commit; GitHub Actions (`.github/workflows/tests.yml`) runs all tests on pull requests.
 
 ## Install
 
 ```bash
 pip install -e .          # runtime only
-pip install -e ".[dev]"   # + ruff, pytest
+pip install -e ".[dev]"   # + ruff, pytest, pre-commit
+pre-commit install        # once per clone: lint + fast tests before each commit
 ```
 
 Requires Python ≥ 3.11 (uses stdlib `tomllib`).
@@ -43,7 +44,9 @@ ruff format nd2_to_cells/ tests/
 ## Tests
 
 ```bash
-pytest                                          # about 2.5 min; no data needed
+pytest            # fast tests, about 1 s (the pre-commit hook runs these)
+pytest -m slow    # the 10 real-data report cases, about 2.5 min
+pytest -m ""      # all tests, as on pull requests
 ```
 
 - The tests import `nd2_to_cells` from this checkout (`pythonpath` in `pyproject.toml`), and `tests/conftest.py` refuses to run against another copy, such as an editable install of the main checkout.
