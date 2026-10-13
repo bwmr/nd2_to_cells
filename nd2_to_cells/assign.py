@@ -158,6 +158,28 @@ class AssignResult:
         self.rev = rev  # revAssign / revmap.{r,f}
 
 
+def colonies(frame) -> tuple[np.ndarray, np.ndarray]:
+    """Colony labels (holes filled, 4-connected background) and centroids.
+
+    Cached on the frame: the colonies only depend on its label image, which
+    is edited in place by delete_regions, merge_regions and missing_seg_2to1;
+    they reset ``frame.colony`` to None.
+    """
+    if getattr(frame, "colony", None) is None:
+        filled = ndimage.binary_fill_holes(frame.labels != 0)
+        colony_labels, n_col = label_colmajor(filled)
+        # Sums over the foreground only: exact integer sums, as over all pixels.
+        rr, cc = np.nonzero(colony_labels)
+        lab = colony_labels[rr, cc]
+        col_area = np.bincount(lab, minlength=n_col + 1)
+        col_cx = np.bincount(lab, weights=cc + 1, minlength=n_col + 1)
+        col_cy = np.bincount(lab, weights=rr + 1, minlength=n_col + 1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            col_cent = np.stack([col_cx / col_area, col_cy / col_area], axis=1)
+        frame.colony = (colony_labels, col_cent)
+    return frame.colony
+
+
 def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float):
     """Port of multiAssignmentSparse(data_c, data_f, CONST, forward)."""
     sign = 1 if forward else -1
@@ -188,19 +210,7 @@ def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float):
     regs_in_c = list(range(1, n_c + 1))  # no manual links
     regs_in_f = list(range(1, n_f + 1))
 
-    # Colony calculation (imfill holes is 4-connected background).
-    filled = ndimage.binary_fill_holes(frame_c.labels != 0)
-    colony_labels, n_col = label_colmajor(filled)
-    col_area = np.bincount(colony_labels.ravel(), minlength=n_col + 1)
-    rr, cc = np.indices(colony_labels.shape)
-    col_cx = np.bincount(
-        colony_labels.ravel(), weights=(cc + 1).ravel(), minlength=n_col + 1
-    )
-    col_cy = np.bincount(
-        colony_labels.ravel(), weights=(rr + 1).ravel(), minlength=n_col + 1
-    )
-    with np.errstate(invalid="ignore", divide="ignore"):
-        col_cent = np.stack([col_cx / col_area, col_cy / col_area], axis=1)
+    colony_labels, col_cent = colonies(frame_c)
 
     pairs_f, _ = find_neighbor_pairs(frame_f, regs_in_f, None)
     pairs_f_set = {frozenset(p) for p in pairs_f}

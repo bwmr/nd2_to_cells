@@ -33,6 +33,7 @@ class Frame:
         self.num_regs = n
         self.edited = False  # labels differ from the Omnipose mask
         self.packed: bytes | None = None  # compressed edited labels
+        self.colony = None  # (labels, centroids) cache of assign.colonies
         self.reset_lineage()
         empty = [[] for _ in range(n + 1)]
         self.map_r, self.map_f = [list(x) for x in empty], [list(x) for x in empty]
@@ -60,6 +61,7 @@ class Frame:
             np.savez_compressed(buf, labels=self.labels)
             self.packed = buf.getvalue()
         self.labels = None
+        self.colony = None
 
     def edited_labels(self) -> np.ndarray | None:
         """The edited label image, or None if the Omnipose mask is unchanged."""
@@ -87,10 +89,11 @@ def region_props(labels: np.ndarray) -> tuple[int, np.ndarray, np.ndarray, np.nd
     """
     n = int(labels.max()) if labels.size else 0
     flat = labels.ravel()
-    rows, cols = np.indices(labels.shape)
+    rows, cols = np.nonzero(labels)  # foreground only; sums stay exact
+    fg = labels[rows, cols]
     area = np.bincount(flat, minlength=n + 1).astype(float)[: n + 1]
-    sx = np.bincount(flat, weights=(cols + 1).ravel(), minlength=n + 1)[: n + 1]
-    sy = np.bincount(flat, weights=(rows + 1).ravel(), minlength=n + 1)[: n + 1]
+    sx = np.bincount(fg, weights=cols + 1, minlength=n + 1)[: n + 1]
+    sy = np.bincount(fg, weights=rows + 1, minlength=n + 1)[: n + 1]
     with np.errstate(invalid="ignore", divide="ignore"):
         centroid = np.stack([sx / area, sy / area], axis=1)
     area[0] = 0  # background; unused
@@ -405,6 +408,7 @@ def delete_regions(c: Frame, regs: list[int]) -> None:
         xs = slice(xmin - 1, xmin + math.floor(w) - 1)
         box = c.labels[ys, xs]
         box[box == mm] = 0
+    c.colony = None
 
 
 def error_rez(

@@ -45,6 +45,7 @@ def merge_regions(frame, list_merge: list[int]) -> bool:
     if len(list_merge) < 2:
         raise RuntimeError("merge2Regions: MATLAB errors here (list_merge(2))")
     new = labels.max() + 1
+    frame.colony = None
     labels[union] = 0
     box = labels[y0:y1, x0:x1]
     box[(comp == 1) & (box == 0)] = new
@@ -131,6 +132,7 @@ def _write_split(frame_c, reg_c: int, new: np.ndarray, n: int) -> bool:
     if np.array_equal(changed, rl):
         return False
     rl[...] = changed
+    frame_c.colony = None
     return True
 
 
