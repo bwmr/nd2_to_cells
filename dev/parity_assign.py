@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ssref  # noqa: E402
 
 from nd2_to_cells.assign import assign  # noqa: E402
-from nd2_to_cells.link import make_frame  # noqa: E402
+from nd2_to_cells.link import Frame  # noqa: E402
 
 DA_MIN, DA_MAX = -0.2, 0.3
 
@@ -76,7 +76,7 @@ def main():
     def get(i):
         if i not in cache:
             regs = ssref.load_regs(files[i - 1])
-            cache[i] = (regs, make_frame(np.asarray(regs.regs_label)))
+            cache[i] = (regs, Frame(np.asarray(regs.regs_label)))
         return cache[i]
 
     fails: Counter = Counter()
