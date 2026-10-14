@@ -85,6 +85,24 @@ Behaviour that MATLAB doesn't have:
 - **Errors.** Where MATLAB would error, a `RuntimeError` names the MATLAB
   line it mirrors.
 
+Known limitation of #2:
+- **Frozen cuts.** When Omnipose keeps two cells fused for many frames, the
+  region is split again in every frame. The seeds cover nearly all of it, so
+  the cut is the previous frame's cut, moved with the pair; moves under half
+  a pixel round to 0. The cut can stay on one pixel row while the junction
+  moves, and the mask then has a straight edge that looks like a crop. On
+  260429 xy03, Cell0000954 is fused with its lower neighbour from t = 119:
+  its cut stays on row 1850 until t = 144, and from t = 150 it is 13–20 px
+  (about 1 µm) above the junction. The lengths and areas of both cells are
+  off by that much.
+- **Tested and not adopted:** seeds that stop 5 px short of each other, for
+  two cells end to end (both long axes within 20° of the line between
+  them). The cut then follows the junction and all tests pass, but over
+  xy01–xy04 A + B rise from 852 to 917 and complete cycles fall from 309 to
+  286. Without the end-to-end condition, the larger of two side-by-side
+  cells takes pixels from the smaller one every frame (xy01_A fails).
+  Re-cutting only the written masks, with linking unchanged, was not tried.
+
 ## How the port was checked
 
 Before the changes, the port was SuperSegger-equivalent. It was checked
