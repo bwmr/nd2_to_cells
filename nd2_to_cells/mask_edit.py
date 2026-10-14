@@ -45,6 +45,7 @@ def merge_regions(frame, list_merge: list[int]) -> bool:
     if len(list_merge) < 2:
         raise RuntimeError("merge2Regions: MATLAB errors here (list_merge(2))")
     new = labels.max() + 1
+    frame.invalidate()
     labels[union] = 0
     box = labels[y0:y1, x0:x1]
     box[(comp == 1) & (box == 0)] = new
@@ -61,26 +62,33 @@ def missing_seg_2to1(frame_c, reg_c: int, frame_r, regs_r: list[int]) -> bool:
     parts inside the region seed a watershed of its distance transform.
     Returns True if the mask changed.
     """
-    new = _seeded_split(frame_c.labels == reg_c, frame_r.labels, regs_r)
-    return new is not None and _write_split(frame_c, reg_c, new, int(new.max()))
+    split = _seeded_split(frame_c.labels == reg_c, frame_r.labels, regs_r)
+    return split is not None and _write_split(frame_c, reg_c, *split)
 
 
-def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | None:
+def _centroid(ys: np.ndarray, xs: np.ndarray) -> np.ndarray:
+    """Centroid of pixel coordinates; the sums are exact, as ndimage's."""
+    return np.array([ys.sum() / len(ys), xs.sum() / len(xs)])
+
+
+def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r):
     """Labels 1 ... n on ``region``, one per previous cell that seeds it.
 
-    Returns None if fewer than two cells leave a seed inside the region.
+    Returns (ys, xs, labels): the window of the work and the labels inside it,
+    or None if fewer than two cells leave a seed inside the region.
     """
     from skimage.segmentation import watershed
 
     prev = np.isin(rl_r, regs_r)
-    shift = np.round(
-        np.array(ndimage.center_of_mass(region)) - ndimage.center_of_mass(prev)
-    ).astype(int)
+    ry, rx = np.nonzero(region)
+    py, px = np.nonzero(prev)
+    shift = np.round(_centroid(ry, rx) - _centroid(py, px)).astype(int)
     # Room for the shift and for the ends of the rotated cells.
-    extent = int(np.ptp(np.nonzero(prev), axis=1).max()) + 1
+    extent = int(max(np.ptp(py), np.ptp(px))) + 1
     margin = MASK_MARGIN + int(np.abs(shift).max())
     margin += int(np.ceil(extent * np.sin(np.deg2rad(max(RIGID_ANGLES)))))
-    ys, xs = _window(region | prev, margin)
+    rows, cols = np.concatenate([ry, py]), np.concatenate([rx, px])
+    ys, xs = _window(region.shape, rows, cols, margin)
     reg = region[ys, xs]
     moved = _rigid_onto(np.where(prev[ys, xs], rl_r[ys, xs], 0), reg)
     seeds = np.zeros(reg.shape, np.int32)
@@ -93,9 +101,7 @@ def _seeded_split(region: np.ndarray, rl_r: np.ndarray, regs_r) -> np.ndarray | 
     if n < 2:
         return None
     dist = ndimage.distance_transform_edt(reg)
-    out = np.zeros(region.shape, np.int32)
-    out[ys, xs] = watershed(-dist, seeds, mask=reg)
-    return out
+    return ys, xs, watershed(-dist, seeds, mask=reg)
 
 
 def _rigid_onto(labels: np.ndarray, region: np.ndarray) -> np.ndarray:
@@ -121,26 +127,28 @@ def _rigid_onto(labels: np.ndarray, region: np.ndarray) -> np.ndarray:
     return best
 
 
-def _write_split(frame_c, reg_c: int, new: np.ndarray, n: int) -> bool:
-    """Replace region reg_c by the pieces of ``new`` (labels 1 ... n)."""
+def _write_split(frame_c, reg_c: int, ys: slice, xs: slice, new: np.ndarray) -> bool:
+    """Replace region reg_c by the pieces ``new`` (labels 1 ... n) in a window.
+
+    The window holds every pixel of reg_c.
+    """
     rl = frame_c.labels
-    out = np.where(np.isin(new, np.arange(1, n + 1)), int(rl.max()) + new, 0)
-    changed = rl.copy()
+    win = rl[ys, xs]
+    out = np.where(new > 0, int(rl.max()) + new, 0)
+    changed = win.copy()
     changed[changed == reg_c] = 0
     changed += out.astype(changed.dtype)
-    if np.array_equal(changed, rl):
+    if np.array_equal(changed, win):
         return False
-    rl[...] = changed
+    rl[ys, xs] = changed
+    frame_c.invalidate()
     return True
 
 
-def _window(support: np.ndarray, margin: int) -> tuple[slice, slice]:
-    """Bounding box of ``support`` plus ``margin``, clipped to the image."""
-    h, w = support.shape
-    if not support.any():
-        return slice(0, h), slice(0, w)
-    ys, xs = ndimage.find_objects(support.astype(np.int8))[0]
+def _window(shape, rows: np.ndarray, cols: np.ndarray, margin: int):
+    """Bounding box of the pixels (rows, cols) plus ``margin``, clipped."""
+    h, w = shape
     return (
-        slice(max(ys.start - margin, 0), min(ys.stop + margin, h)),
-        slice(max(xs.start - margin, 0), min(xs.stop + margin, w)),
+        slice(max(rows.min() - margin, 0), min(rows.max() + 1 + margin, h)),
+        slice(max(cols.min() - margin, 0), min(cols.max() + 1 + margin, w)),
     )

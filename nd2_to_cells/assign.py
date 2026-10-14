@@ -29,7 +29,6 @@ AREA_CHANGE_FACTOR = 100
 OUTWARD_MOT_FACTOR = 1 / 10
 BOX_PAD = 20
 
-_SQUARE5 = np.ones((5, 5), dtype=bool)
 _CONN8 = np.ones((3, 3), dtype=int)
 
 
@@ -129,7 +128,10 @@ def find_neighbor_pairs(frame_c, regs_in_c: list[int], frame_f):
     for jj in regs_in_c:
         ys, xs = box_limits(frame_c, [jj])
         box_c = frame_c.labels[ys, xs]
-        tmp_mask = ndimage.binary_dilation(box_c == jj, structure=_SQUARE5)
+        # 5x5 dilation as a separable max filter (binary_dilation is slower)
+        tmp_mask = ndimage.maximum_filter(
+            (box_c == jj).view(np.uint8), size=5, mode="constant"
+        ).astype(bool)
         ind = np.unique(box_c[tmp_mask])
         for uu in ind[ind > jj]:
             if int(uu) in regs_set:
@@ -156,6 +158,38 @@ class AssignResult:
         self.ids_f = ids_f  # indexF / idsR.r or idsF.f
         self.d_area = d_area  # dA / dA.{r,f}
         self.rev = rev  # revAssign / revmap.{r,f}
+
+
+def neighbor_pairs(frame, regs: list[int]) -> list[tuple[int, int]]:
+    """Touching pairs among all regions of ``frame``, cached on the frame.
+
+    Reset with the colonies when the labels are edited in place.
+    """
+    if getattr(frame, "pairs", None) is None:
+        frame.pairs = find_neighbor_pairs(frame, regs, None)[0]
+    return frame.pairs
+
+
+def colonies(frame) -> tuple[np.ndarray, np.ndarray]:
+    """Colony labels (holes filled, 4-connected background) and centroids.
+
+    Cached on the frame: the colonies only depend on its label image, which
+    is edited in place by delete_regions, merge_regions and missing_seg_2to1;
+    they call ``frame.invalidate()``.
+    """
+    if getattr(frame, "colony", None) is None:
+        filled = ndimage.binary_fill_holes(frame.labels != 0)
+        colony_labels, n_col = label_colmajor(filled)
+        # Sums over the foreground only: exact integer sums, as over all pixels.
+        rr, cc = np.nonzero(colony_labels)
+        lab = colony_labels[rr, cc]
+        col_area = np.bincount(lab, minlength=n_col + 1)
+        col_cx = np.bincount(lab, weights=cc + 1, minlength=n_col + 1)
+        col_cy = np.bincount(lab, weights=rr + 1, minlength=n_col + 1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            col_cent = np.stack([col_cx / col_area, col_cy / col_area], axis=1)
+        frame.colony = (colony_labels, col_cent)
+    return frame.colony
 
 
 def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float):
@@ -188,21 +222,9 @@ def assign(frame_c, frame_f, forward: bool, da_min: float, da_max: float):
     regs_in_c = list(range(1, n_c + 1))  # no manual links
     regs_in_f = list(range(1, n_f + 1))
 
-    # Colony calculation (imfill holes is 4-connected background).
-    filled = ndimage.binary_fill_holes(frame_c.labels != 0)
-    colony_labels, n_col = label_colmajor(filled)
-    col_area = np.bincount(colony_labels.ravel(), minlength=n_col + 1)
-    rr, cc = np.indices(colony_labels.shape)
-    col_cx = np.bincount(
-        colony_labels.ravel(), weights=(cc + 1).ravel(), minlength=n_col + 1
-    )
-    col_cy = np.bincount(
-        colony_labels.ravel(), weights=(rr + 1).ravel(), minlength=n_col + 1
-    )
-    with np.errstate(invalid="ignore", divide="ignore"):
-        col_cent = np.stack([col_cx / col_area, col_cy / col_area], axis=1)
+    colony_labels, col_cent = colonies(frame_c)
 
-    pairs_f, _ = find_neighbor_pairs(frame_f, regs_in_f, None)
+    pairs_f = neighbor_pairs(frame_f, regs_in_f)
     pairs_f_set = {frozenset(p) for p in pairs_f}
     pairs_c, neigh_f = find_neighbor_pairs(frame_c, regs_in_c, frame_f)
     all_c = [(r, None) for r in regs_in_c] + list(pairs_c)
